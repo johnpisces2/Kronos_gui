@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kronos Financial Prediction Web UI</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="/static/plotly.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <style>
         * {
@@ -494,6 +494,31 @@
                     📁 Load Data
                 </button>
 
+                <hr style="margin: 15px 0; border: 1px solid #e2e8f0;">
+
+                <!-- Fetch from Binance -->
+                <div class="form-group">
+                    <label>Or Fetch Live Data from Binance:</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <select id="symbol-select" style="flex: 1;">
+                            <option value="BTC/USDT">BTC/USDT</option>
+                            <option value="ETH/USDT">ETH/USDT</option>
+                            <option value="BNB/USDT">BNB/USDT</option>
+                        </select>
+                        <select id="binance-timeframe" style="width: 100px;">
+                            <option value="1h">1h</option>
+                            <option value="4h">4h</option>
+                            <option value="1d">1d</option>
+                        </select>
+                        <input type="number" id="binance-limit" value="600" min="100" max="1000" style="width: 80px;">
+                    </div>
+                    <small class="form-text">Symbol, timeframe, and limit (max 1000)</small>
+                </div>
+
+                <button id="fetch-binance-btn" class="btn btn-warning">
+                    🔄 Fetch from Binance
+                </button>
+
                 <!-- Data Information Display -->
                 <div id="data-info" class="data-info" style="display: none;">
                     <h3>📊 Data Information</h3>
@@ -534,35 +559,45 @@
                 <!-- Prediction Parameters -->
                 <div class="form-group">
                     <label for="lookback">Lookback Window Size:</label>
-                    <input type="number" id="lookback" value="400" readonly>
-                    <small class="form-text">Fixed at 400 data points</small>
+                    <input type="number" id="lookback" value="400" min="50" max="512">
+                    <small class="form-text">Historical data points (max: 512 - pred_len)</small>
                 </div>
 
                 <div class="form-group">
                     <label for="pred-len">Prediction Length:</label>
-                    <input type="number" id="pred-len" value="120" readonly>
-                    <small class="form-text">Fixed at 120 data points</small>
+                    <input type="number" id="pred-len" value="72" min="1" max="200">
+                    <small class="form-text">Future prediction points (max 200)</small>
                 </div>
 
                 <!-- Prediction Quality Parameters -->
                 <div class="form-group">
                     <label for="temperature">Prediction Temperature (T):</label>
-                    <input type="range" id="temperature" value="1.0" min="0.1" max="2.0" step="0.1">
-                    <span id="temperature-value">1.0</span>
-                    <small class="form-text">Controls prediction randomness, higher values make predictions more diverse, lower values make predictions more conservative</small>
+                    <input type="range" id="temperature" value="0.5" min="0.1" max="2.0" step="0.1">
+                    <span id="temperature-value">0.5</span>
+                    <small class="form-text">Lower = more conservative/stable (recommended: 0.3-0.5 for financial data)</small>
                 </div>
 
                 <div class="form-group">
                     <label for="top-p">Nucleus Sampling Parameter (top_p):</label>
-                    <input type="range" id="top-p" value="0.9" min="0.1" max="1.0" step="0.1">
-                    <span id="top-p-value">0.9</span>
-                    <small class="form-text">Controls prediction diversity, higher values consider broader probability distributions</small>
+                    <input type="range" id="top-p" value="0.8" min="0.1" max="1.0" step="0.1">
+                    <span id="top-p-value">0.8</span>
+                    <small class="form-text">Lower = more focused on likely outcomes (recommended: 0.7-0.8 for less noise)</small>
                 </div>
 
                 <div class="form-group">
                     <label for="sample-count">Sample Count:</label>
-                    <input type="number" id="sample-count" value="1" min="1" max="5" step="1">
-                    <small class="form-text">Generate multiple prediction samples to improve quality (recommended 1-3)</small>
+                    <input type="number" id="sample-count" value="5" min="1" max="5" step="1">
+                    <small class="form-text">Higher = more stable predictions (recommended: 5)</small>
+                </div>
+                
+                <div class="form-group" style="background: #e8f5e9; padding: 10px; border-radius: 8px; margin-top: 10px;">
+                    <label style="color: #2e7d32;">💡 Recommended Settings for MAPE &lt; 2%:</label>
+                    <ul style="margin: 5px 0 0 20px; color: #555; font-size: 12px;">
+                        <li>Timeframe: <strong>4h</strong> (less noise than 1h)</li>
+                        <li>Lookback: <strong>280</strong>, Pred Len: <strong>18</strong></li>
+                        <li>Sample Count: <strong>5</strong></li>
+                        <li>T: <strong>0.5</strong>, Top_p: <strong>0.8</strong></li>
+                    </ul>
                 </div>
 
                 <button id="predict-btn" class="btn btn-success" disabled>
@@ -648,6 +683,14 @@
         // Initialize application
         async function initializeApp() {
             console.log('🚀 Initializing Kronos Web UI...');
+            
+            // Check Plotly availability
+            if (typeof Plotly === 'undefined') {
+                console.error('Plotly is not loaded!');
+                showStatus('error', 'Plotly library failed to load. Please check your internet connection.');
+            } else {
+                console.log('✅ Plotly loaded:', Plotly.version || 'available');
+            }
             
             // Load available models
             await loadAvailableModels();
@@ -739,7 +782,10 @@
                 const status = response.data;
                 
                 if (status.loaded) {
-                    showStatus('success', `Model loaded: ${status.current_model.name} on ${status.current_model.device}`);
+                    let deviceInfo = status.current_model.backend === 'mlx' 
+                        ? 'Apple Silicon MLX' 
+                        : `on ${status.current_model.device}`;
+                    showStatus('success', `Model loaded: ${status.current_model.name} ${deviceInfo}`);
                 } else if (status.available) {
                     showStatus('info', 'Model available but not loaded');
                 } else {
@@ -903,13 +949,19 @@
             });
         }
 
+        // Get current window size from inputs
+        function getCurrentWindowSize() {
+            const lookback = parseInt(document.getElementById('lookback').value) || 400;
+            const predLen = parseInt(document.getElementById('pred-len').value) || 72;
+            return lookback + predLen;
+        }
+
         // Update start handle position
         function updateStartHandle(percentage) {
             const startHandle = document.getElementById('start-handle');
             const selection = document.getElementById('slider-selection');
             
-            // Fixed window size of 520 data points
-            const windowSize = 520;
+            const windowSize = getCurrentWindowSize();
             const totalRows = sliderData ? sliderData.totalRows : 1000;
             const windowPercentage = windowSize / totalRows;
             
@@ -932,8 +984,7 @@
             const endHandle = document.getElementById('end-handle');
             const selection = document.getElementById('slider-selection');
             
-            // Fixed window size of 520 data points
-            const windowSize = 520;
+            const windowSize = getCurrentWindowSize();
             const totalRows = sliderData ? sliderData.totalRows : 1000;
             const windowPercentage = windowSize / totalRows;
             
@@ -973,22 +1024,26 @@
             document.getElementById('window-start').textContent = `Start: ${startDate.toLocaleDateString()}`;
             document.getElementById('window-end').textContent = `End: ${endDate.toLocaleDateString()}`;
             
-            // Display fixed window size
-            document.getElementById('window-size').textContent = `Window Size: 400 + 120 = 520 data points (fixed)`;
-            
-            // Input field values remain fixed
-            document.getElementById('lookback').value = 400;
-            document.getElementById('pred-len').value = 120;
+            // Display dynamic window size
+            const windowSize = getCurrentWindowSize();
+            const lookback = parseInt(document.getElementById('lookback').value) || 400;
+            const predLen = parseInt(document.getElementById('pred-len').value) || 72;
+            document.getElementById('window-size').textContent = `Window Size: ${lookback} + ${predLen} = ${windowSize} / 512`;
         }
 
         // Update slider based on input fields
         function updateSliderFromInputs() {
             if (!sliderData) return;
             
-            // Fixed window size: 400 + 120 = 520 data points
-            const lookback = 400;
-            const predLen = 120;
-            const windowSize = lookback + predLen; // Fixed at 520
+            const lookback = parseInt(document.getElementById('lookback').value) || 400;
+            const predLen = parseInt(document.getElementById('pred-len').value) || 72;
+            const windowSize = lookback + predLen;
+            
+            // Validate: lookback + pred_len <= 512
+            if (windowSize > 512) {
+                showStatus('error', `lookback (${lookback}) + pred_len (${predLen}) = ${windowSize} exceeds max context 512`);
+                return;
+            }
             
             // Calculate slider position
             const totalRows = sliderData.totalRows;
@@ -999,9 +1054,10 @@
                 return;
             }
             
-            // Calculate slider position (default select first half of data)
-            const startPercentage = 0.1; // Start from 10%
-            const endPercentage = startPercentage + (windowSize / totalRows);
+            // Calculate slider position - default to LATEST data (window at end)
+            // The window should be positioned so that its END aligns with the END of the data
+            const startPercentage = 1 - (windowSize / totalRows);
+            const endPercentage = 1.0;
             
             // Update handle positions
             updateStartHandle(startPercentage);
@@ -1047,12 +1103,22 @@
                 const lookback = parseInt(document.getElementById('lookback').value);
                 const predLen = parseInt(document.getElementById('pred-len').value);
                 
+                // Validate lookback + pred_len <= 512 (model context limit)
+                if (lookback + predLen > 512) {
+                    showStatus('error', `lookback (${lookback}) + pred_len (${predLen}) = ${lookback + predLen} exceeds max context 512`);
+                    document.getElementById('predict-btn').disabled = false;
+                    showLoading(false);
+                    return;
+                }
+                
                 // Get selected time range from time window slider
                 const startHandle = document.getElementById('start-handle');
                 const startPercentage = parseFloat(startHandle.style.left) / 100;
                 
                 if (!sliderData) {
                     showStatus('error', 'Time window slider not initialized');
+                    document.getElementById('predict-btn').disabled = false;
+                    showLoading(false);
                     return;
                 }
                 
@@ -1098,16 +1164,187 @@
 
         // Display prediction results
         function displayPredictionResult(result) {
-            // Display chart
-            const chartData = JSON.parse(result.chart);
-            Plotly.newPlot('chart', chartData.data, chartData.layout);
-            
-            // Display comparison analysis (if actual data exists)
-            if (result.has_comparison) {
-                displayComparisonAnalysis(result);
-            } else {
-                document.getElementById('comparison-section').style.display = 'none';
+            try {
+                // Display chart
+                const chartData = JSON.parse(result.chart);
+                console.log('Chart data received, traces:', chartData.data.length);
+                
+                const chartDiv = document.getElementById('chart');
+                if (!chartDiv) {
+                    console.error('Chart div not found!');
+                    showStatus('error', 'Chart container not found');
+                    return;
+                }
+                
+                // Check if Plotly is available
+                if (typeof Plotly === 'undefined' || !Plotly.newPlot) {
+                    console.error('Plotly not loaded, showing fallback');
+                    showFallbackChart(result);
+                    return;
+                }
+                
+                // Clear existing plot first
+                Plotly.purge('chart');
+                
+                // Create the plot
+                const plotlyPromise = Plotly.newPlot('chart', chartData.data, chartData.layout, {
+                    responsive: true,
+                    displayModeBar: true,
+                    displaylogo: false
+                });
+                
+                // Handle as promise
+                plotlyPromise.then(function() {
+                    console.log('Chart rendered successfully');
+                }).catch(function(err) {
+                    console.error('Plotly error:', err);
+                    showFallbackChart(result);
+                });
+                
+                // Display comparison analysis (if actual data exists)
+                if (result.has_comparison) {
+                    displayComparisonAnalysis(result);
+                } else {
+                    document.getElementById('comparison-section').style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Error rendering chart:', error);
+                showFallbackChart(result);
             }
+        }
+        
+        // Fallback: Show chart using Canvas if Plotly fails
+        function showFallbackChart(result) {
+            const chartDiv = document.getElementById('chart');
+            
+            if (!result.prediction_results || result.prediction_results.length === 0) {
+                chartDiv.innerHTML = '<p style="padding:20px;">No prediction data available</p>';
+                return;
+            }
+            
+            const pred = result.prediction_results;
+            const actual = result.actual_data || [];
+            
+            // Get price data
+            const predPrices = pred.map(p => p.close);
+            const actualPrices = actual.length > 0 ? actual.map(a => a.close) : null;
+            
+            // Calculate price range
+            const allPrices = actualPrices ? [...predPrices, ...actualPrices] : predPrices;
+            const minPrice = Math.min(...allPrices) * 0.995;
+            const maxPrice = Math.max(...allPrices) * 1.005;
+            
+            // Create SVG chart
+            const width = chartDiv.clientWidth || 800;
+            const height = 400;
+            const padding = { top: 20, right: 20, bottom: 40, left: 60 };
+            const chartWidth = width - padding.left - padding.right;
+            const chartHeight = height - padding.top - padding.bottom;
+            
+            let svg = `<svg width="${width}" height="${height}" style="font-family: Arial, sans-serif;">`;
+            
+            // Background
+            svg += `<rect width="${width}" height="${height}" fill="white"/>`;
+            
+            // Grid lines
+            const gridCount = 5;
+            for (let i = 0; i <= gridCount; i++) {
+                const y = padding.top + (chartHeight / gridCount) * i;
+                const price = maxPrice - (maxPrice - minPrice) * (i / gridCount);
+                svg += `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#e0e0e0" stroke-dasharray="2"/>`;
+                svg += `<text x="${padding.left - 5}" y="${y + 4}" text-anchor="end" font-size="11" fill="#666">${price.toFixed(0)}</text>`;
+            }
+            
+            // Helper function to convert price to Y coordinate
+            const priceToY = (price) => {
+                return padding.top + chartHeight * (1 - (price - minPrice) / (maxPrice - minPrice));
+            };
+            
+            // Helper function to convert index to X coordinate
+            const indexToX = (index, total) => {
+                return padding.left + (index / (total - 1)) * chartWidth;
+            };
+            
+            // Draw actual data line (if available)
+            if (actualPrices && actualPrices.length > 0) {
+                let actualPath = `M ${indexToX(0, actualPrices.length)} ${priceToY(actualPrices[0])}`;
+                for (let i = 1; i < actualPrices.length; i++) {
+                    actualPath += ` L ${indexToX(i, actualPrices.length)} ${priceToY(actualPrices[i])}`;
+                }
+                svg += `<path d="${actualPath}" fill="none" stroke="#2196F3" stroke-width="2"/>`;
+            }
+            
+            // Draw prediction line
+            let predPath = `M ${indexToX(0, predPrices.length)} ${priceToY(predPrices[0])}`;
+            for (let i = 1; i < predPrices.length; i++) {
+                predPath += ` L ${indexToX(i, predPrices.length)} ${priceToY(predPrices[i])}`;
+            }
+            svg += `<path d="${predPath}" fill="none" stroke="#FF9800" stroke-width="2" stroke-dasharray="5,3"/>`;
+            
+            // X-axis labels
+            const labelCount = 6;
+            for (let i = 0; i < labelCount; i++) {
+                const index = Math.floor((i / (labelCount - 1)) * (pred.length - 1));
+                const x = indexToX(index, pred.length);
+                const date = new Date(pred[index].timestamp);
+                svg += `<text x="${x}" y="${height - 10}" text-anchor="middle" font-size="10" fill="#666">${date.toLocaleDateString()}</text>`;
+            }
+            
+            // Legend
+            svg += `<rect x="${width - 150}" y="${padding.top}" width="15" height="15" fill="#FF9800" opacity="0.7"/>`;
+            svg += `<text x="${width - 130}" y="${padding.top + 12}" font-size="12" fill="#333">Prediction</text>`;
+            if (actualPrices) {
+                svg += `<rect x="${width - 150}" y="${padding.top + 25}" width="15" height="15" fill="#2196F3"/>`;
+                svg += `<text x="${width - 130}" y="${padding.top + 37}" font-size="12" fill="#333">Actual</text>`;
+            }
+            
+            svg += '</svg>';
+            
+            chartDiv.innerHTML = `
+                <div style="padding: 10px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; margin-bottom: 10px;">
+                    <strong>⚠️ Using fallback chart (Plotly not available)</strong>
+                </div>
+                <div style="overflow-x: auto;">
+                    ${svg}
+                </div>
+                <details style="margin-top: 10px;">
+                    <summary style="cursor: pointer; color: #666;">Show data table</summary>
+                    <div style="max-height: 200px; overflow-y: auto; margin-top: 10px;">
+                        <table border="1" style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                            <thead>
+                                <tr style="background: #f8f9fa;">
+                                    <th>Time</th>
+                                    <th>Actual Close</th>
+                                    <th>Predicted Close</th>
+                                    <th>Error %</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${generateChartTableRows(result)}
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
+            `;
+        }
+        
+        function generateChartTableRows(result) {
+            if (!result.prediction_results || !result.actual_data) return '';
+            const pred = result.prediction_results;
+            const actual = result.actual_data;
+            let html = '';
+            for (let i = 0; i < Math.min(pred.length, actual.length); i++) {
+                const p = pred[i];
+                const a = actual[i];
+                const error = ((p.close - a.close) / a.close * 100).toFixed(2);
+                html += `<tr>
+                    <td>${new Date(p.timestamp).toLocaleString()}</td>
+                    <td>${a.close.toFixed(2)}</td>
+                    <td>${p.close.toFixed(2)}</td>
+                    <td style="color: ${parseFloat(error) > 0 ? 'green' : 'red'}">${error}%</td>
+                </tr>`;
+            }
+            return html;
         }
 
         // Display comparison analysis
@@ -1182,7 +1419,61 @@
                     <td>${act.close.toFixed(4)}</td>
                     <td>${pred.close.toFixed(4)}</td>
                 `;
-                tbody.appendChild(row);
+                    tbody.appendChild(row);
+            }
+        }
+
+        // Fetch data from Binance
+        async function fetchBinanceData() {
+            const symbol = document.getElementById('symbol-select').value;
+            const timeframe = document.getElementById('binance-timeframe').value;
+            const limit = parseInt(document.getElementById('binance-limit').value);
+            
+            try {
+                showLoading(true);
+                document.getElementById('fetch-binance-btn').disabled = true;
+                
+                const response = await axios.post('/api/fetch-binance-data', {
+                    symbol: symbol,
+                    timeframe: timeframe,
+                    limit: limit
+                });
+                
+                if (response.data.success) {
+                    currentDataFile = 'binance:' + symbol;
+                    currentDataInfo = response.data.data_info;
+                    showDataInfo(response.data.data_info);
+                    showStatus('success', response.data.message);
+                    
+                    // Auto-adjust lookback/pred_len based on timeframe
+                    if (timeframe === '4h') {
+                        document.getElementById('lookback').value = 280;
+                        document.getElementById('pred-len').value = 18;
+                        showStatus('info', '4h selected: lookback=280, pred_len=18 (optimized for lower MAPE)');
+                    } else if (timeframe === '1d') {
+                        document.getElementById('lookback').value = 180;
+                        document.getElementById('pred-len').value = 7;
+                        showStatus('info', '1d selected: lookback=180, pred_len=7 (optimized for lower MAPE)');
+                    } else {
+                        document.getElementById('lookback').value = 440;
+                        document.getElementById('pred-len').value = 72;
+                    }
+                    
+                    // Enable prediction if model is loaded
+                    if (modelLoaded) {
+                        document.getElementById('predict-btn').disabled = false;
+                    }
+                    
+                    console.log('✅ Binance data fetched successfully:', response.data.data_info);
+                } else {
+                    showStatus('error', response.data.error);
+                }
+            } catch (error) {
+                console.error('❌ Binance data fetch failed:', error);
+                showStatus('error', `Failed to fetch data from Binance: ${error.response?.data?.error || error.message}`);
+            } finally {
+                showLoading(false);
+                document.getElementById('fetch-binance-btn').disabled = false;
             }
         }
 
@@ -1193,6 +1484,9 @@
             
             // Load data button
             document.getElementById('load-data-btn').addEventListener('click', loadData);
+            
+            // Fetch Binance data button
+            document.getElementById('fetch-binance-btn').addEventListener('click', fetchBinanceData);
             
             // Prediction button
             document.getElementById('predict-btn').addEventListener('click', startPrediction);

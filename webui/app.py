@@ -15,11 +15,23 @@ warnings.filterwarnings('ignore')
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from model import Kronos, KronosTokenizer, KronosPredictor
-    MODEL_AVAILABLE = True
+    from model import Kronos as PyTorchKronos, KronosTokenizer as PyTorchTokenizer, KronosPredictor as PyTorchPredictor
+    PYTORCH_AVAILABLE = True
 except ImportError:
-    MODEL_AVAILABLE = False
-    print("Warning: Kronos model cannot be imported, will use simulated data for demonstration")
+    PYTORCH_AVAILABLE = False
+    print("Warning: PyTorch Kronos model cannot be imported")
+
+try:
+    from kronos_mlx import Kronos as MLXKronos, KronosTokenizer as MLXTokenizer, KronosPredictor as MLXPredictor
+    MLX_AVAILABLE = True
+except ImportError:
+    MLX_AVAILABLE = False
+    print("Warning: MLX Kronos model cannot be imported")
+
+MODEL_AVAILABLE = PYTORCH_AVAILABLE or MLX_AVAILABLE
+
+if not MODEL_AVAILABLE:
+    print("Warning: No Kronos model library available, will use simulated data for demonstration")
 
 app = Flask(__name__)
 CORS(app)
@@ -28,32 +40,49 @@ CORS(app)
 tokenizer = None
 model = None
 predictor = None
+current_df = None
+current_file_path = None
 
 # Available model configurations
+LOCAL_MLX_MODEL_PATH = "/Users/ppppp/Desktop/workspace/Kronos_gui/model/kronos-mlx-base"
+
 AVAILABLE_MODELS = {
     'kronos-mini': {
-        'name': 'Kronos-mini',
+        'name': 'Kronos-mini (PyTorch)',
         'model_id': 'NeoQuasar/Kronos-mini',
         'tokenizer_id': 'NeoQuasar/Kronos-Tokenizer-2k',
         'context_length': 2048,
         'params': '4.1M',
-        'description': 'Lightweight model, suitable for fast prediction'
+        'description': 'Lightweight model, suitable for fast prediction',
+        'backend': 'pytorch'
     },
     'kronos-small': {
-        'name': 'Kronos-small',
+        'name': 'Kronos-small (PyTorch)',
         'model_id': 'NeoQuasar/Kronos-small',
         'tokenizer_id': 'NeoQuasar/Kronos-Tokenizer-base',
         'context_length': 512,
         'params': '24.7M',
-        'description': 'Small model, balanced performance and speed'
+        'description': 'Small model, balanced performance and speed',
+        'backend': 'pytorch'
     },
     'kronos-base': {
-        'name': 'Kronos-base',
+        'name': 'Kronos-base (PyTorch)',
         'model_id': 'NeoQuasar/Kronos-base',
         'tokenizer_id': 'NeoQuasar/Kronos-Tokenizer-base',
         'context_length': 512,
         'params': '102.3M',
-        'description': 'Base model, provides better prediction quality'
+        'description': 'Base model, provides better prediction quality',
+        'backend': 'pytorch'
+    },
+    'kronos-mlx-base-8bit': {
+        'name': 'Kronos-base (MLX 8-bit)',
+        'model_id': LOCAL_MLX_MODEL_PATH,
+        'tokenizer_id': 'gxcsoccer/kronos-mlx-tokenizer-base',
+        'context_length': 512,
+        'params': '~115MB (8-bit quantized)',
+        'description': 'MLX Apple Silicon optimized, 8-bit quantization, best quality/speed ratio',
+        'backend': 'mlx',
+        'bits': 8
     }
 }
 
@@ -338,9 +367,83 @@ def get_data_files():
     data_files = load_data_files()
     return jsonify(data_files)
 
+
+@app.route('/api/fetch-binance-data', methods=['POST'])
+def fetch_binance_data():
+    """Fetch BTC 1h data from Binance using CCXT"""
+    global current_df
+    
+    try:
+        import ccxt
+        
+        data = request.get_json()
+        symbol = data.get('symbol', 'BTC/USDT')
+        timeframe = data.get('timeframe', '1h')
+        limit = int(data.get('limit', 600))
+        
+        print(f"Fetching {symbol} {timeframe} data from Binance...")
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'future'}
+        })
+        
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamps'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.drop('timestamp', axis=1, inplace=True)
+        df['amount'] = df['volume'] * df['close'] * 0.0001
+        
+        current_df = df
+        
+        def detect_timeframe(df):
+            if len(df) < 2:
+                return "Unknown"
+            time_diffs = []
+            for i in range(1, min(10, len(df))):
+                diff = df['timestamps'].iloc[i] - df['timestamps'].iloc[i-1]
+                time_diffs.append(diff)
+            if not time_diffs:
+                return "Unknown"
+            avg_diff = sum(time_diffs, pd.Timedelta(0)) / len(time_diffs)
+            if avg_diff < pd.Timedelta(minutes=1):
+                return f"{avg_diff.total_seconds():.0f} seconds"
+            elif avg_diff < pd.Timedelta(hours=1):
+                return f"{avg_diff.total_seconds() / 60:.0f} minutes"
+            elif avg_diff < pd.Timedelta(days=1):
+                return f"{avg_diff.total_seconds() / 3600:.0f} hours"
+            else:
+                return f"{avg_diff.days} days"
+        
+        data_info = {
+            'rows': len(df),
+            'columns': list(df.columns),
+            'start_date': df['timestamps'].min().isoformat() if 'timestamps' in df.columns else 'N/A',
+            'end_date': df['timestamps'].max().isoformat() if 'timestamps' in df.columns else 'N/A',
+            'price_range': {
+                'min': float(df[['open', 'high', 'low', 'close']].min().min()),
+                'max': float(df[['open', 'high', 'low', 'close']].max().max())
+            },
+            'prediction_columns': ['open', 'high', 'low', 'close', 'volume'],
+            'timeframe': detect_timeframe(df),
+            'symbol': symbol,
+            'source': 'binance'
+        }
+        
+        return jsonify({
+            'success': True,
+            'data_info': data_info,
+            'message': f'Successfully fetched {len(df)} rows of {symbol} data from Binance'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch data from Binance: {str(e)}'}), 500
+
 @app.route('/api/load-data', methods=['POST'])
 def load_data():
     """Load data file"""
+    global current_df, current_file_path
+    
     try:
         data = request.get_json()
         file_path = data.get('file_path')
@@ -351,6 +454,9 @@ def load_data():
         df, error = load_data_file(file_path)
         if error:
             return jsonify({'error': error}), 400
+        
+        current_df = df
+        current_file_path = file_path
         
         # Detect data time frequency
         def detect_timeframe(df):
@@ -389,7 +495,8 @@ def load_data():
                 'max': float(df[['open', 'high', 'low', 'close']].max().max())
             },
             'prediction_columns': ['open', 'high', 'low', 'close'] + (['volume'] if 'volume' in df.columns else []),
-            'timeframe': detect_timeframe(df)
+            'timeframe': detect_timeframe(df),
+            'source': 'file'
         }
         
         return jsonify({
@@ -404,6 +511,8 @@ def load_data():
 @app.route('/api/predict', methods=['POST'])
 def predict():
     """Perform prediction"""
+    global current_df, current_file_path
+    
     try:
         data = request.get_json()
         file_path = data.get('file_path')
@@ -415,13 +524,26 @@ def predict():
         top_p = float(data.get('top_p', 0.9))
         sample_count = int(data.get('sample_count', 1))
         
-        if not file_path:
-            return jsonify({'error': 'File path cannot be empty'}), 400
+        # Use in-memory data from Binance if available, otherwise load from file
+        is_binance_source = file_path and file_path.startswith('binance:')
         
-        # Load data
-        df, error = load_data_file(file_path)
-        if error:
-            return jsonify({'error': error}), 400
+        if is_binance_source and current_df is not None and len(current_df) > 0:
+            df = current_df
+            data_source = 'binance'
+        elif is_binance_source:
+            return jsonify({'error': 'No Binance data loaded. Please fetch data from Binance first.'}), 400
+        elif current_df is not None and len(current_df) > 0:
+            df = current_df
+            data_source = 'file'
+        elif file_path:
+            df, error = load_data_file(file_path)
+            if error:
+                return jsonify({'error': error}), 400
+            current_df = df
+            current_file_path = file_path
+            data_source = 'file'
+        else:
+            return jsonify({'error': 'No data loaded. Please fetch data from Binance or load a file first.'}), 400
         
         if len(df) < lookback:
             return jsonify({'error': f'Insufficient data length, need at least {lookback} rows'}), 400
@@ -438,7 +560,15 @@ def predict():
                 # Process time period selection
                 start_date = data.get('start_date')
                 
+                # Validate start_date - if it's too old relative to data, ignore it
                 if start_date:
+                    start_dt = pd.to_datetime(start_date)
+                    # Check if start_date is reasonable (within last 30 days of data)
+                    if len(df) > 0 and start_dt < df['timestamps'].min():
+                        # start_date is too old, ignore it and use latest
+                        start_date = None
+                
+                if start_date and start_date != 'null' and start_date != '':
                     # Custom time period - fix logic: use data within selected window
                     start_dt = pd.to_datetime(start_date)
                     
@@ -462,13 +592,13 @@ def predict():
                     end_timestamp = time_range_df['timestamps'].iloc[lookback+pred_len-1]
                     time_span = end_timestamp - start_timestamp
                     
-                    prediction_type = f"Kronos model prediction (within selected window: first {lookback} data points for prediction, last {pred_len} data points for comparison, time span: {time_span})"
+                    prediction_type = f"Kronos model prediction ({data_source}, within selected window: first {lookback} data points for prediction, last {pred_len} data points for comparison, time span: {time_span})"
                 else:
                     # Use latest data
                     x_df = df.iloc[:lookback][required_cols]
                     x_timestamp = df.iloc[:lookback]['timestamps']
                     y_timestamp = df.iloc[lookback:lookback+pred_len]['timestamps']
-                    prediction_type = "Kronos model prediction (latest data)"
+                    prediction_type = f"Kronos model prediction ({data_source}, latest data)"
                 
                 # Ensure timestamps are Series format, not DatetimeIndex, to avoid .dt attribute error in Kronos model
                 if isinstance(x_timestamp, pd.DatetimeIndex):
@@ -547,41 +677,23 @@ def predict():
         
         chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
         
-        # Prepare prediction result data - fix timestamp calculation logic
-        if 'timestamps' in df.columns:
-            if start_date:
-                # Custom time period: use selected window data to calculate timestamps
-                start_dt = pd.to_datetime(start_date)
-                mask = df['timestamps'] >= start_dt
-                time_range_df = df[mask]
-                
-                if len(time_range_df) >= lookback:
-                    # Calculate prediction timestamps starting from last time point of selected window
-                    last_timestamp = time_range_df['timestamps'].iloc[lookback-1]
-                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
-                    future_timestamps = pd.date_range(
-                        start=last_timestamp + time_diff,
-                        periods=pred_len,
-                        freq=time_diff
-                    )
-                else:
-                    future_timestamps = []
-            else:
-                # Latest data: calculate from last time point of entire data file
-                last_timestamp = df['timestamps'].iloc[-1]
-                time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
-                future_timestamps = pd.date_range(
-                    start=last_timestamp + time_diff,
-                    periods=pred_len,
-                    freq=time_diff
-                )
-        else:
-            future_timestamps = range(len(df), len(df) + pred_len)
-        
+        # Prepare prediction result data - use y_timestamp directly for comparison
+        # y_timestamp contains the actual timestamps that match the comparison data
         prediction_results = []
         for i, (_, row) in enumerate(pred_df.iterrows()):
+            # Use y_timestamp if available (for historical comparison)
+            # Otherwise use calculated future_timestamps (for true future prediction)
+            if i < len(y_timestamp):
+                ts = y_timestamp.iloc[i]
+                if hasattr(ts, 'isoformat'):
+                    ts = ts.isoformat()
+                elif pd.isna(ts):
+                    ts = f"T{i}"
+            else:
+                ts = f"T{i}"
+                
             prediction_results.append({
-                'timestamp': future_timestamps[i].isoformat() if i < len(future_timestamps) else f"T{i}",
+                'timestamp': ts,
                 'open': float(row['open']),
                 'high': float(row['high']),
                 'low': float(row['low']),
@@ -630,34 +742,59 @@ def load_model():
     
     try:
         if not MODEL_AVAILABLE:
-            return jsonify({'error': 'Kronos model library not available'}), 400
+            return jsonify({'error': 'No Kronos model library available'}), 400
         
         data = request.get_json()
         model_key = data.get('model_key', 'kronos-small')
-        device = data.get('device', 'cpu')
         
         if model_key not in AVAILABLE_MODELS:
             return jsonify({'error': f'Unsupported model: {model_key}'}), 400
         
         model_config = AVAILABLE_MODELS[model_key]
+        backend = model_config.get('backend', 'pytorch')
         
-        # Load tokenizer and model
-        tokenizer = KronosTokenizer.from_pretrained(model_config['tokenizer_id'])
-        model = Kronos.from_pretrained(model_config['model_id'])
-        
-        # Create predictor
-        predictor = KronosPredictor(model, tokenizer, device=device, max_context=model_config['context_length'])
-        
-        return jsonify({
-            'success': True,
-            'message': f'Model loaded successfully: {model_config["name"]} ({model_config["params"]}) on {device}',
-            'model_info': {
-                'name': model_config['name'],
-                'params': model_config['params'],
-                'context_length': model_config['context_length'],
-                'description': model_config['description']
-            }
-        })
+        if backend == 'mlx':
+            if not MLX_AVAILABLE:
+                return jsonify({'error': 'MLX model requested but kronos_mlx not available'}), 400
+            
+            tokenizer = MLXTokenizer.from_pretrained(model_config['tokenizer_id'])
+            bits = model_config.get('bits', 8)
+            model = MLXKronos.from_pretrained(model_config['model_id'], bits=bits)
+            predictor = MLXPredictor(model, tokenizer, max_context=model_config['context_length'])
+            
+            return jsonify({
+                'success': True,
+                'message': f'Model loaded successfully: {model_config["name"]} ({model_config["params"]}) on Apple Silicon MLX',
+                'model_info': {
+                    'name': model_config['name'],
+                    'params': model_config['params'],
+                    'context_length': model_config['context_length'],
+                    'description': model_config['description'],
+                    'backend': 'mlx',
+                    'bits': bits
+                }
+            })
+        else:
+            if not PYTORCH_AVAILABLE:
+                return jsonify({'error': 'PyTorch model requested but PyTorch Kronos not available'}), 400
+            
+            device = data.get('device', 'cpu')
+            tokenizer = PyTorchTokenizer.from_pretrained(model_config['tokenizer_id'])
+            model = PyTorchKronos.from_pretrained(model_config['model_id'])
+            predictor = PyTorchPredictor(model, tokenizer, device=device, max_context=model_config['context_length'])
+            
+            return jsonify({
+                'success': True,
+                'message': f'Model loaded successfully: {model_config["name"]} ({model_config["params"]}) on {device}',
+                'model_info': {
+                    'name': model_config['name'],
+                    'params': model_config['params'],
+                    'context_length': model_config['context_length'],
+                    'description': model_config['description'],
+                    'backend': 'pytorch',
+                    'device': device
+                }
+            })
         
     except Exception as e:
         return jsonify({'error': f'Model loading failed: {str(e)}'}), 500
@@ -667,7 +804,9 @@ def get_available_models():
     """Get available model list"""
     return jsonify({
         'models': AVAILABLE_MODELS,
-        'model_available': MODEL_AVAILABLE
+        'model_available': MODEL_AVAILABLE,
+        'pytorch_available': PYTORCH_AVAILABLE,
+        'mlx_available': MLX_AVAILABLE
     })
 
 @app.route('/api/model-status')
@@ -675,15 +814,28 @@ def get_model_status():
     """Get model status"""
     if MODEL_AVAILABLE:
         if predictor is not None:
-            return jsonify({
-                'available': True,
-                'loaded': True,
-                'message': 'Kronos model loaded and available',
-                'current_model': {
-                    'name': predictor.model.__class__.__name__,
-                    'device': str(next(predictor.model.parameters()).device)
-                }
-            })
+            model_name = predictor.model.__class__.__name__
+            if MLX_AVAILABLE and isinstance(predictor, MLXPredictor):
+                return jsonify({
+                    'available': True,
+                    'loaded': True,
+                    'message': 'Kronos MLX model loaded and available',
+                    'current_model': {
+                        'name': model_name,
+                        'backend': 'mlx'
+                    }
+                })
+            else:
+                return jsonify({
+                    'available': True,
+                    'loaded': True,
+                    'message': 'Kronos PyTorch model loaded and available',
+                    'current_model': {
+                        'name': model_name,
+                        'backend': 'pytorch',
+                        'device': str(next(predictor.model.parameters()).device)
+                    }
+                })
         else:
             return jsonify({
                 'available': True,
@@ -694,7 +846,7 @@ def get_model_status():
         return jsonify({
             'available': False,
             'loaded': False,
-            'message': 'Kronos model library not available, please install related dependencies'
+            'message': 'No Kronos model library available, please install kronos_mlx or PyTorch Kronos'
         })
 
 if __name__ == '__main__':

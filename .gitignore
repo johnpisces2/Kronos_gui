@@ -74,3 +74,9 @@ venv.bak/
 temp/
 tmp/
 .python-version
+
+# Output results
+prediction_results/
+
+# Model files
+model/kronos-*/
