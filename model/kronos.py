@@ -491,12 +491,14 @@ class KronosPredictor:
         self.amt_vol = 'amount'
         self.time_cols = ['minute', 'hour', 'weekday', 'day', 'month']
         
-        # Auto-detect device if not specified
+        # Auto-detect device if not specified (priority: mps > xpu > cuda > cpu)
         if device is None:
-            if torch.cuda.is_available():
-                device = "cuda:0"
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 device = "mps"
+            elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+                device = "xpu"
+            elif torch.cuda.is_available():
+                device = "cuda:0"
             else:
                 device = "cpu"
         

@@ -327,7 +327,7 @@ def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, his
     
     # Update layout
     fig.update_layout(
-        title='Kronos Financial Prediction Results - 400 Historical Points + 120 Prediction Points vs 120 Actual Points',
+        title='Kronos BTC Forecast Terminal - 400 Historical Points + 120 Prediction Points vs 120 Actual Points',
         xaxis_title='Time',
         yaxis_title='Price',
         template='plotly_white',

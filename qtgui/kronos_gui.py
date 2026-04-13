@@ -34,6 +34,7 @@ try:
         QPushButton,
         QSpinBox,
         QStatusBar,
+        QTabWidget,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -56,6 +57,7 @@ except ImportError:
         QPushButton,
         QSpinBox,
         QStatusBar,
+        QTabWidget,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -67,6 +69,7 @@ try:
 except ImportError:
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import FuncFormatter
 
 try:
@@ -147,7 +150,7 @@ def build_future_timestamps(last_timestamp, step, pred_len):
 
 
 def format_price(value):
-    return f"${value:,.2f}"
+    return f"${value:,.0f}"
 
 
 def default_lookback_for_context(context_length, pred_len):
@@ -189,27 +192,17 @@ class TerminalBadge(QLabel):
 
 
 class PriceChartCanvas(FigureCanvas):
-    def __init__(self):
+    def __init__(self, chart_type="price"):
+        self.chart_type = chart_type
         self.figure = Figure(figsize=(8.8, 6.4), facecolor="#151515")
         super().__init__(self.figure)
         self.setStyleSheet("background: transparent;")
-        self.price_ax = self.figure.add_subplot(211)
-        self.validation_ax = self.figure.add_subplot(212)
-        self.figure.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.1, hspace=0.35)
-        self.draw_empty()
+        if chart_type == "price":
+            self.draw_empty("Load data to see historical prices and forecast.")
+        else:
+            self.draw_empty("Load data to see validation results.")
 
-    def _style_axes(self):
-        for ax in (self.price_ax, self.validation_ax):
-            ax.set_facecolor("#1b1b1b")
-            ax.grid(True, color="#4b5563", alpha=0.30, linewidth=0.8)
-            ax.tick_params(colors="#d4d4d8", labelsize=9)
-            ax.spines["bottom"].set_color("#52525b")
-            ax.spines["left"].set_color("#52525b")
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"${x:,.0f}"))
-
-    def draw_empty(self, message="Load data to see historical prices and forecast."):
+    def draw_empty(self, message=None):
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         ax.set_facecolor("#1b1b1b")
@@ -249,7 +242,7 @@ class PriceChartCanvas(FigureCanvas):
         self.price_ax.plot(
             chart_df["timestamps"],
             chart_df["close"],
-            color="#60a5fa",
+            color="#71717a",
             linewidth=1.8,
             label="Historical close",
         )
@@ -275,7 +268,7 @@ class PriceChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw_idle()
 
-    def plot_prediction(
+    def plot_forecast(
         self,
         *,
         symbol,
@@ -283,14 +276,17 @@ class PriceChartCanvas(FigureCanvas):
         context_df,
         future_pred_df,
         forecast_interval_df=None,
-        validation_history_df=None,
-        validation_pred_df=None,
-        validation_actual_df=None,
     ):
         self.figure.clear()
-        self.price_ax = self.figure.add_subplot(211)
-        self.validation_ax = self.figure.add_subplot(212)
-        self._style_axes()
+        self.price_ax = self.figure.add_subplot(111)
+        self.price_ax.set_facecolor("#1b1b1b")
+        self.price_ax.grid(True, color="#4b5563", alpha=0.30, linewidth=0.8)
+        self.price_ax.tick_params(colors="#d4d4d8", labelsize=9)
+        self.price_ax.spines["bottom"].set_color("#52525b")
+        self.price_ax.spines["left"].set_color("#52525b")
+        self.price_ax.spines["top"].set_visible(False)
+        self.price_ax.spines["right"].set_visible(False)
+        self.price_ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"${x:,.0f}"))
 
         history_chart_df = context_df.tail(min(len(context_df), 240)).copy()
         forecast_df = future_pred_df.copy()
@@ -300,7 +296,7 @@ class PriceChartCanvas(FigureCanvas):
         self.price_ax.plot(
             history_chart_df["timestamps"],
             history_chart_df["close"],
-            color="#60a5fa",
+            color="#71717a",
             linewidth=1.8,
             label="Historical close",
         )
@@ -344,6 +340,42 @@ class PriceChartCanvas(FigureCanvas):
             labelcolor="#e5e7eb",
         )
 
+        price_latest_x = history_chart_df["timestamps"].iloc[-1]
+        price_latest_y = history_chart_df["close"].iloc[-1]
+        self.price_ax.axvline(price_latest_x, color="#00d4ff", linewidth=1.0, linestyle="--", alpha=0.8)
+        self.price_ax.axhline(price_latest_y, color="#00d4ff", linewidth=1.0, linestyle="--", alpha=0.8)
+        self.price_ax.annotate(
+            f" {price_latest_y:,.0f}",
+            xy=(price_latest_x, price_latest_y),
+            xytext=(5, 0),
+            textcoords="offset points",
+            color="#00d4ff",
+            fontsize=10,
+            fontweight="bold",
+            va="center",
+        )
+
+        self.figure.tight_layout()
+        self.draw_idle()
+
+    def plot_validation(
+        self,
+        *,
+        validation_history_df=None,
+        validation_pred_df=None,
+        validation_actual_df=None,
+    ):
+        self.figure.clear()
+        self.validation_ax = self.figure.add_subplot(111)
+        self.validation_ax.set_facecolor("#1b1b1b")
+        self.validation_ax.grid(True, color="#4b5563", alpha=0.30, linewidth=0.8)
+        self.validation_ax.tick_params(colors="#d4d4d8", labelsize=9)
+        self.validation_ax.spines["bottom"].set_color("#52525b")
+        self.validation_ax.spines["left"].set_color("#52525b")
+        self.validation_ax.spines["top"].set_visible(False)
+        self.validation_ax.spines["right"].set_visible(False)
+        self.validation_ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"${x:,.0f}"))
+
         if (
             validation_history_df is not None
             and validation_pred_df is not None
@@ -383,6 +415,19 @@ class PriceChartCanvas(FigureCanvas):
                 linestyle="--",
                 alpha=0.8,
             )
+            start_price = val_hist_df["close"].iloc[-1]
+            start_x = val_hist_df["timestamps"].iloc[-1]
+            self.validation_ax.axhline(start_price, color="#71717a", linewidth=1.0, linestyle="--", alpha=0.8)
+            self.validation_ax.annotate(
+                f" {start_price:,.0f}",
+                xy=(start_x, start_price),
+                xytext=(5, 0),
+                textcoords="offset points",
+                color="#71717a",
+                fontsize=10,
+                fontweight="bold",
+                va="center",
+            )
             self.validation_ax.set_title(
                 "Recent validation on latest closed candles",
                 color="#fafafa",
@@ -394,6 +439,32 @@ class PriceChartCanvas(FigureCanvas):
                 facecolor="#18181b",
                 edgecolor="#3f3f46",
                 labelcolor="#e5e7eb",
+            )
+
+            pred_latest_x = val_pred_df["timestamps"].iloc[-1]
+            pred_latest_y = val_pred_df["close"].iloc[-1]
+            self.validation_ax.annotate(
+                f" {pred_latest_y:,.0f}",
+                xy=(pred_latest_x, pred_latest_y),
+                xytext=(5, 0),
+                textcoords="offset points",
+                color="#c084fc",
+                fontsize=10,
+                fontweight="bold",
+                va="center",
+            )
+
+            valid_latest_x = val_actual_df["timestamps"].iloc[-1]
+            valid_latest_y = val_actual_df["close"].iloc[-1]
+            self.validation_ax.annotate(
+                f" {valid_latest_y:,.0f}",
+                xy=(valid_latest_x, valid_latest_y),
+                xytext=(5, 0),
+                textcoords="offset points",
+                color="#34d399",
+                fontsize=10,
+                fontweight="bold",
+                va="center",
             )
         else:
             self.validation_ax.text(
@@ -427,6 +498,10 @@ class KronosGUI(QMainWindow):
         self.current_symbol = "BTC/USDT"
         self.current_timeframe = "4h"
         self.dispatch.connect(self._run_on_ui_thread)
+        self.auto_forecast_running = False
+        self.auto_forecast_timer = None
+        self.last_auto_forecast_time = None
+        self.busy = False
         self.init_ui()
         self.show()
 
@@ -455,8 +530,8 @@ class KronosGUI(QMainWindow):
         callback()
 
     def init_ui(self):
-        self.setWindowTitle(f"Kronos BTC Prediction ({QT_API})")
-        self.setGeometry(90, 90, 1380, 790)
+        self.setWindowTitle("Kronos BTC Forecast Terminal")
+        self.setGeometry(90, 90, 1380, 900)
         self.setStyleSheet(
             """
             QMainWindow, QWidget {
@@ -502,14 +577,22 @@ class KronosGUI(QMainWindow):
             }
             QSpinBox::up-button, QSpinBox::down-button,
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-                width: 22px;
-                background: #2f2f34;
-                border-left: 1px solid #52525b;
+                width: 24px;
+                background: #3f3f46;
+                border: none;
             }
+            QSpinBox::up-button { border-radius: 0 6px 0 0; }
+            QSpinBox::down-button { border-radius: 0 0 6px 0; }
+            QDoubleSpinBox::up-button { border-radius: 0 6px 0 0; }
+            QDoubleSpinBox::down-button { border-radius: 0 0 6px 0; }
             QSpinBox::up-button:hover, QSpinBox::down-button:hover,
             QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
-                background: #3f3f46;
+                background: #52525b;
             }
+            QSpinBox::up-arrow { image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAABVSURBVDiNY2AYBaMBMDIyMvzHwD8YkIGBgYHhjyoeEG9gYPj3H5mHgYGB4T8Dw38Ghv8MDP8Z/jP8Z2D4z8Dwn4HhPwPDfwaG/wwM/xkY/jMw/Gdg+M/A8B8DA8MAJgwMAADdJQr9b9HqPwAAAABJRU5ErkJggg==); }
+            QSpinBox::down-arrow { image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAA6SURBVDiNY2AYBaNgGABGRkbG/xgY/jMw/Gdg+M/A8J+B4T8Dw38Ghv8MDP8ZGP4zMPxnYPjPwPCfgeE/AwAj6Q0F9LZR8AAAAABJRU5ErkJggg==); }
+            QDoubleSpinBox::up-arrow { image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAABVSURBVDiNY2AYBaMBMDIyMvzHwD8YkIGBgYHhjyoeEG9gYPj3H5mHgYGB4T8Dw38Ghv8MDP8Z/jP8Z2D4z8Dwn4HhPwPDfwaG/wwM/xkY/jMw/Gdg+M/A8B8DA8MAJgwMAADdJQr9b9HqPwAAAABJRU5ErkJggg==); }
+            QDoubleSpinBox::down-arrow { image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAA6SURBVDiNY2AYBaNgGABGRkbG/xgY/jMw/Gdg+M/A8J+B4T8Dw38Ghv8MDP8ZGP4zMPxnYPjPwPCfgeE/AwAj6Q0F9LZR8AAAAABJRU5ErkJggg==); }
             QTextEdit {
                 padding: 6px;
                 font-family: Menlo, Consolas, monospace;
@@ -567,6 +650,19 @@ class KronosGUI(QMainWindow):
         main_layout.addWidget(self.create_left_panel(), 0)
         main_layout.addWidget(self.create_right_panel(), 1)
         self.update_badges(feed_status="IDLE")
+
+        self.auto_controls = [
+            self.symbol_combo,
+            self.tf_combo,
+            self.limit_spin,
+            self.lookback_spin,
+            self.predlen_spin,
+            self.temp_spin,
+            self.topp_spin,
+            self.sample_spin,
+            self.model_combo,
+            self.predict_btn,
+        ]
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -627,7 +723,7 @@ class KronosGUI(QMainWindow):
 
         market_layout.addWidget(QLabel("Limit"), 2, 0)
         self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(120, 1500)
+        self.limit_spin.setRange(120, 2048)
         self.limit_spin.setValue(600)
         market_layout.addWidget(self.limit_spin, 2, 1)
         layout.addWidget(market_group)
@@ -666,15 +762,37 @@ class KronosGUI(QMainWindow):
 
         params_layout.addWidget(QLabel("Samples"), 4, 0)
         self.sample_spin = QSpinBox()
-        self.sample_spin.setRange(1, 5)
+        self.sample_spin.setRange(1, 100)
         self.sample_spin.setValue(3)
         params_layout.addWidget(self.sample_spin, 4, 1)
 
         layout.addWidget(params)
 
-        self.predict_btn = QPushButton("Run Forecast")
+        self.predict_btn = QPushButton("Run Single Forecast")
         self.predict_btn.clicked.connect(self.start_prediction)
         layout.addWidget(self.predict_btn)
+
+        self.auto_forecast_btn = QPushButton("Run Auto Forecast")
+        self.auto_forecast_btn.setStyleSheet("""
+            QPushButton {
+                background: #16a34a;
+            }
+            QPushButton:hover {
+                background: #15803d;
+            }
+            QPushButton:disabled {
+                background: #27272a;
+                color: #71717a;
+            }
+        """)
+        self.auto_forecast_btn.clicked.connect(self.toggle_auto_forecast)
+        layout.addWidget(self.auto_forecast_btn)
+
+        self.auto_status_label = QLabel("")
+        self.auto_status_label.setStyleSheet("color: #16a34a; font-weight: bold;")
+        layout.addWidget(self.auto_status_label)
+
+        self.progress = QProgressBar()
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -707,7 +825,7 @@ class KronosGUI(QMainWindow):
         header_layout.setContentsMargins(14, 12, 14, 12)
         header_layout.setSpacing(6)
 
-        self.title_label = QLabel("BTC Futures Forecast Terminal")
+        self.title_label = QLabel("Kronos BTC Forecast Terminal")
         self.title_label.setObjectName("titleLabel")
         header_layout.addWidget(self.title_label)
 
@@ -748,25 +866,37 @@ class KronosGUI(QMainWindow):
         metrics_layout.addWidget(self.mape_card, 1, 1)
         layout.addWidget(metrics_frame)
 
-        chart_group = QGroupBox("Chart Deck")
-        chart_layout = QVBoxLayout(chart_group)
-        chart_layout.setContentsMargins(10, 10, 10, 10)
-        chart_layout.setSpacing(8)
-        self.chart_canvas = PriceChartCanvas()
-        chart_layout.addWidget(self.chart_canvas)
-        layout.addWidget(chart_group, 5)
-
-        results_group = QGroupBox("Run Log")
-        results_layout = QVBoxLayout(results_group)
-        results_layout.setContentsMargins(10, 10, 10, 10)
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setStyleSheet("QTabWidget::pane { border: none; }")
+        
+        forecast_tab = QWidget()
+        forecast_layout = QVBoxLayout(forecast_tab)
+        forecast_layout.setContentsMargins(10, 10, 10, 10)
+        forecast_layout.setSpacing(8)
+        self.forecast_canvas = PriceChartCanvas(chart_type="price")
+        forecast_layout.addWidget(self.forecast_canvas)
+        self.main_tabs.addTab(forecast_tab, "Forecast")
+        
+        validation_tab = QWidget()
+        validation_layout = QVBoxLayout(validation_tab)
+        validation_layout.setContentsMargins(10, 10, 10, 10)
+        validation_layout.setSpacing(8)
+        self.validation_canvas = PriceChartCanvas(chart_type="validation")
+        validation_layout.addWidget(self.validation_canvas)
+        self.main_tabs.addTab(validation_tab, "Validation")
+        
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        log_layout.setContentsMargins(10, 10, 10, 10)
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
-        self.results_text.setMinimumHeight(170)
         self.results_text.setPlaceholderText(
             "Forecast details and run log will appear here."
         )
-        results_layout.addWidget(self.results_text)
-        layout.addWidget(results_group, 2)
+        log_layout.addWidget(self.results_text)
+        self.main_tabs.addTab(log_tab, "Log")
+        
+        layout.addWidget(self.main_tabs)
 
         self.set_metric_defaults()
         return container
@@ -844,6 +974,9 @@ class KronosGUI(QMainWindow):
 
     def set_busy(self, *, loading=False, fetching=False, predicting=False):
         busy = loading or fetching or predicting
+        self.busy = busy
+        if self.auto_forecast_running and not predicting:
+            return
         self.model_combo.setEnabled(not busy)
         self.symbol_combo.setEnabled(not busy)
         self.tf_combo.setEnabled(not busy)
@@ -854,6 +987,8 @@ class KronosGUI(QMainWindow):
         self.topp_spin.setEnabled(not busy)
         self.sample_spin.setEnabled(not busy)
         self.predict_btn.setEnabled(not busy)
+        if not self.auto_forecast_running:
+            self.auto_forecast_btn.setEnabled(not busy)
         self.progress.setVisible(busy)
 
     def show_error(self, title, message):
@@ -916,6 +1051,116 @@ class KronosGUI(QMainWindow):
             "timeframe": timeframe,
         }
 
+    def toggle_auto_forecast(self):
+        if self.auto_forecast_running:
+            self.stop_auto_forecast()
+        else:
+            self.start_auto_forecast()
+
+    def start_auto_forecast(self):
+        self.auto_forecast_running = True
+        self.auto_forecast_btn.setText("Stop Auto Forecast")
+        self._set_controls_enabled(False)
+        self.auto_status_label.setText("Auto Forecast: Running")
+        self.append_log("[AUTO] Auto forecast started")
+        self._run_auto_forecast()
+
+    def stop_auto_forecast(self):
+        self.auto_forecast_running = False
+        if self.auto_forecast_timer:
+            self.auto_forecast_timer.cancel()
+            self.auto_forecast_timer = None
+        self.auto_forecast_btn.setText("Run Auto Forecast")
+        self.auto_forecast_btn.setEnabled(True)
+        self.auto_status_label.setText("")
+        self.append_log("[AUTO] Auto forecast stopped")
+        self._set_controls_enabled(True)
+
+    def _set_controls_enabled(self, enabled):
+        for ctrl in self.auto_controls:
+            ctrl.setEnabled(enabled)
+
+    def _run_auto_forecast(self):
+        if not self.auto_forecast_running:
+            return
+        if hasattr(self, 'busy') and self.busy:
+            self.append_log("[AUTO] Previous forecast still running, skipping this cycle")
+            return
+        self.append_log(f"[AUTO] Running scheduled forecast at {pd.Timestamp.now()}")
+        self.start_prediction()
+
+    def _schedule_next_auto_forecast(self):
+        if not self.auto_forecast_running:
+            return
+        timeframe = self.current_timeframe
+        now = pd.Timestamp.now()
+        next_run = self._get_next_candle_time(now, timeframe)
+        wait_seconds = (next_run - now).total_seconds()
+        if wait_seconds <= 0:
+            wait_seconds = self._get_interval_seconds(timeframe)
+        self.auto_forecast_timer = threading.Timer(wait_seconds, self._on_timer_elapsed)
+        self.auto_forecast_timer.daemon = True
+        self.auto_forecast_timer.start()
+        self.last_auto_forecast_time = now
+        self.auto_status_label.setText(f"Next: {next_run.strftime('%H:%M')}")
+
+    def _get_interval_seconds(self, timeframe):
+        intervals = {
+            "5m": 5 * 60,
+            "15m": 15 * 60,
+            "1h": 60 * 60,
+            "4h": 4 * 60 * 60,
+            "1d": 24 * 60 * 60,
+        }
+        return intervals.get(timeframe, 3600)
+
+    def _get_next_candle_time(self, now, timeframe):
+        tf_minutes = {
+            "5m": 5,
+            "15m": 15,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440,
+        }
+        mins = tf_minutes.get(timeframe, 60)
+        freq = pd.DateOffset(minutes=mins)
+        if timeframe == "1d":
+            current_candle = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if now.hour > 0:
+                current_candle += pd.DateOffset(days=1)
+        else:
+            minutes_since_midnight = now.hour * 60 + now.minute
+            current_candle_num = (minutes_since_midnight // mins) * mins
+            current_candle = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            current_candle += pd.DateOffset(minutes=current_candle_num)
+        next_candle = current_candle + freq
+        if next_candle <= now:
+            next_candle += freq
+        return next_candle
+
+    def _on_timer_elapsed(self):
+        self.dispatch.emit(self._run_auto_forecast)
+
+    def _save_forecast_results(self, payload):
+        symbol = payload.get("symbol", "UNKNOWN").replace("/", "_")
+        timeframe = payload.get("timeframe", "UNKNOWN")
+        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join(PROJECT_ROOT, "prediction_results", symbol, timeframe)
+        os.makedirs(save_dir, exist_ok=True)
+
+        log_file = os.path.join(save_dir, f"log_{timestamp}.txt")
+        with open(log_file, "w") as f:
+            f.write(payload.get("summary_text", ""))
+
+        try:
+            forecast_path = os.path.join(save_dir, f"forecast_{timestamp}.png")
+            self.forecast_canvas.figure.savefig(forecast_path, dpi=150, facecolor="#151515")
+            validation_path = os.path.join(save_dir, f"validation_{timestamp}.png")
+            self.validation_canvas.figure.savefig(validation_path, dpi=150, facecolor="#151515")
+            self.append_log(f"[AUTO] Saved: forecast/validation/log files at {timestamp}")
+        except Exception as e:
+            self.append_log(f"[AUTO] Warning: Could not save charts: {e}")
+
     def start_prediction(self):
         symbol = self.symbol_combo.currentText()
         timeframe = self.tf_combo.currentText()
@@ -949,12 +1194,22 @@ class KronosGUI(QMainWindow):
 
         def work():
             try:
-                self.dispatch.emit(lambda: self.append_log("[INFO] Loading selected model..."))
+                if not self.auto_forecast_running:
+                    return
+
+                self.dispatch.emit(lambda: self.auto_forecast_running and self.append_log("[INFO] Loading selected model..."))
                 predictor, backend_name = self.ensure_predictor_loaded()
 
-                self.dispatch.emit(lambda: self.update_badges(feed_status="SYNC"))
-                self.dispatch.emit(lambda: self.append_log("[INFO] Syncing latest Binance futures candles..."))
+                if not self.auto_forecast_running:
+                    return
+
+                self.dispatch.emit(lambda: self.auto_forecast_running and self.update_badges(feed_status="SYNC"))
+                self.dispatch.emit(lambda: self.auto_forecast_running and self.append_log("[INFO] Syncing latest Binance futures candles..."))
                 df = self.fetch_market_data_sync(symbol, timeframe, limit)
+
+                if not self.auto_forecast_running:
+                    return
+
                 if len(df) < lookback:
                     raise ValueError(f"Insufficient data. Need at least {lookback} bars, have {len(df)}.")
 
@@ -966,9 +1221,9 @@ class KronosGUI(QMainWindow):
                     )
                 )
 
-                self.dispatch.emit(lambda: self.update_badges(feed_status="FORECAST"))
+                self.dispatch.emit(lambda: self.auto_forecast_running and self.update_badges(feed_status="FORECAST"))
                 self.dispatch.emit(
-                    lambda: self.append_log(
+                    lambda: self.auto_forecast_running and self.append_log(
                         f"[INFO] Forecasting with T={temperature}, top_p={top_p}, samples={sample_count}..."
                     )
                 )
@@ -1130,8 +1385,8 @@ class KronosGUI(QMainWindow):
             val_y_ts = ensure_timestamp_series(
                 validation_slice.iloc[lookback : lookback + pred_len]["timestamps"]
             )
-            validation_actual_df = validation_slice.iloc[lookback : lookback + pred_len].copy()
-            validation_actual_df["timestamps"] = val_y_ts
+            validation_actual_df = validation_slice.iloc[lookback : lookback + pred_len].copy().reset_index(drop=True)
+            validation_actual_df["timestamps"] = val_y_ts.reset_index(drop=True)
 
             validation_pred_df = predictor.predict(
                 df=val_x_df,
@@ -1142,7 +1397,8 @@ class KronosGUI(QMainWindow):
                 top_p=top_p,
                 sample_count=sample_count,
                 verbose=False,
-            ).reset_index().rename(columns={"index": "timestamps"})
+            )
+            validation_pred_df = validation_pred_df.reset_index().rename(columns={"index": "timestamps"})
 
             pred_prices = validation_pred_df["close"].to_numpy()
             actual_prices = validation_actual_df["close"].to_numpy()
@@ -1198,6 +1454,8 @@ class KronosGUI(QMainWindow):
         }
 
     def on_pipeline_data_ready(self, backend_name, data_summary):
+        if not self.auto_forecast_running:
+            return
         self.backend_name = backend_name
         self.title_label.setText(f"{data_summary['symbol']} futures forecast")
         self.subtitle_label.setText(
@@ -1214,6 +1472,8 @@ class KronosGUI(QMainWindow):
         )
 
     def on_prediction_ready(self, payload, predictor):
+        if not self.auto_forecast_running:
+            return
         self.predictor = predictor
         self.loaded_model_key = self.selected_model_key
         self.df = payload["df"]
@@ -1225,18 +1485,23 @@ class KronosGUI(QMainWindow):
         self.move_card.set_content(payload["forecast_move"], "Predicted move from latest close")
         self.mape_card.set_content(payload["mape_text"], payload["subtitle"])
         self.subtitle_label.setText(payload["subtitle"])
-        self.chart_canvas.plot_prediction(
+        self.forecast_canvas.plot_forecast(
             symbol=self.current_symbol,
             timeframe=self.current_timeframe,
             context_df=payload["context_df"],
             future_pred_df=payload["future_pred_df"],
             forecast_interval_df=payload["forecast_interval_df"],
+        )
+        self.validation_canvas.plot_validation(
             validation_history_df=payload["validation_history_df"],
             validation_pred_df=payload["validation_pred_df"],
             validation_actual_df=payload["validation_actual_df"],
         )
         self.status_bar.showMessage("Forecast complete")
         self.update_badges(feed_status="READY")
+        if self.auto_forecast_running:
+            self._save_forecast_results(payload)
+            self._schedule_next_auto_forecast()
         self.set_busy()
 
     def on_worker_error(self, title, message):
@@ -1244,6 +1509,11 @@ class KronosGUI(QMainWindow):
         self.update_badges(feed_status="ALERT")
         self.show_error(title, message)
         self.set_busy()
+
+    def on_work_complete(self):
+        if not self.auto_forecast_running:
+            self.update_badges(feed_status="IDLE")
+            self.set_busy()
 
 
 def main():
