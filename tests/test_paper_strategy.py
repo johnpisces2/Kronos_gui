@@ -65,9 +65,8 @@ class TestPaperStrategy(unittest.TestCase):
 
         self.assertAlmostEqual(snapshot.forecast_return, 0.04, places=6)
         self.assertAlmostEqual(snapshot.validation_pred_return, 0.03, places=6)
-        self.assertAlmostEqual(snapshot.validation_actual_return, 0.02, places=6)
         self.assertEqual(snapshot.validation_history_delta, 4.0)
-        self.assertEqual(snapshot.validation_actual_delta, 1.5)
+        self.assertEqual(snapshot.validation_pred_delta, 2.0)
 
     def test_entry_long_uses_half_of_forecast_edge_as_stop_distance(self):
         config = PaperStrategyConfig(
@@ -95,14 +94,15 @@ class TestPaperStrategy(unittest.TestCase):
         self.assertEqual(decision.action, "enter_short")
         self.assertAlmostEqual(decision.stop_price, 102.0, places=6)
 
-    def test_exit_long_when_validation_actual_reverses(self):
+    def test_exit_long_when_validation_pred_invalidates_signal(self):
         snapshot = build_signal_snapshot(
-            build_payload(validation_actual=(101.5, 100.0))
+            build_payload(validation_pred=(101.0, 99.0))
         )
         position = PaperPosition(
             side="long",
             entry_price=100.0,
             stop_price=98.0,
+            take_profit_price=104.0,
             entry_time=pd.Timestamp("2026-04-14 04:00:00"),
         )
 
@@ -123,6 +123,7 @@ class TestPaperStrategy(unittest.TestCase):
             side="short",
             entry_price=100.0,
             stop_price=102.0,
+            take_profit_price=96.0,
             entry_time=pd.Timestamp("2026-04-14 04:00:00"),
         )
 

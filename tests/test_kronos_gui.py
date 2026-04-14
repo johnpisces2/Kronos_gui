@@ -110,6 +110,43 @@ def build_paper_entry_payload():
     return payload
 
 
+def build_paper_exit_payload():
+    payload = build_paper_entry_payload()
+    payload["context_df"] = pd.DataFrame(
+        {
+            "timestamps": pd.date_range("2026-04-10 16:00:00", periods=4, freq="4h"),
+            "close": [101.0, 102.0, 103.0, 103.5],
+        }
+    )
+    payload["future_pred_df"] = pd.DataFrame(
+        {
+            "timestamps": pd.date_range("2026-04-11 08:00:00", periods=2, freq="4h"),
+            "close": [102.0, 101.0],
+        }
+    )
+    payload["validation_history_df"] = pd.DataFrame(
+        {
+            "timestamps": pd.date_range("2026-04-10 00:00:00", periods=4, freq="4h"),
+            "close": [100.0, 101.0, 102.0, 103.0],
+        }
+    )
+    payload["validation_pred_df"] = pd.DataFrame(
+        {
+            "timestamps": pd.date_range("2026-04-10 16:00:00", periods=2, freq="4h"),
+            "close": [102.0, 101.0],
+        }
+    )
+    payload["validation_actual_df"] = pd.DataFrame(
+        {
+            "timestamps": pd.date_range("2026-04-10 16:00:00", periods=2, freq="4h"),
+            "close": [103.0, 102.0],
+        }
+    )
+    payload["forecast_end"] = "$101"
+    payload["forecast_move"] = "+1.00%"
+    return payload
+
+
 def build_gui_stub():
     from qtgui.kronos_gui import KronosGUI
 
@@ -130,6 +167,7 @@ def build_gui_stub():
     gui.set_busy = MagicMock()
     gui._save_forecast_results = MagicMock()
     gui._schedule_next_auto_forecast = MagicMock()
+    gui.paper_trade_history = []
     gui.append_log = MagicMock()
     gui.show_error = MagicMock()
     gui.update_paper_mode = MagicMock()
@@ -333,7 +371,7 @@ class TestQtGuiIntegration(unittest.TestCase):
             for i in range(self.window.main_tabs.count())
         ]
 
-        self.assertEqual(tab_labels, ["Forecast", "Validation", "Paper Mode", "Log"])
+        self.assertEqual(tab_labels, ["Market", "Execution"])
 
     def test_auto_forecast_button_click_toggles_running_and_stopped_state(self):
         self.window._run_auto_forecast = MagicMock()
@@ -408,19 +446,31 @@ class TestQtGuiIntegration(unittest.TestCase):
 
     def test_prediction_ready_updates_paper_mode_tab(self):
         payload = build_paper_entry_payload()
+        self.window.paper_risk_checkbox.setChecked(False)
+        self.app.processEvents()
+        self.window.paper_order_qty_spin.setValue(2.0)
+        self.window.paper_leverage_spin.setValue(5)
         self.window.active_run_id = 1
 
         self.window.on_prediction_ready(payload, predictor=MagicMock(), run_id=1, auto_run=False)
         self.app.processEvents()
 
         self.assertEqual(self.window.paper_position.side, "long")
+        self.assertEqual(self.window.paper_position.quantity, 2.0)
+        self.assertEqual(self.window.paper_position.leverage, 5)
         self.assertIn("ENTER LONG", self.window.paper_signal_card.value_label.text())
-        self.assertIn("LONG @", self.window.paper_position_card.value_label.text())
-        self.assertIn("ENTER LONG", self.window.paper_trade_log.toPlainText())
+        self.assertIn("LONG 2", self.window.paper_position_card.value_label.text())
         self.assertEqual(self.window.paper_trade_table.rowCount(), 1)
         self.assertEqual(self.window.paper_position_table.item(0, 0).text(), "LONG")
+        self.assertEqual(self.window.paper_position_table.item(0, 2).text(), "2")
+        self.assertEqual(self.window.paper_position_table.item(0, 3).text(), "5x")
+        self.assertEqual(self.window.paper_position_table.item(0, 6).text(), "$200")
+        self.assertEqual(self.window.paper_notional_value.text(), "$200")
+        self.assertEqual(self.window.paper_margin_value.text(), "$40")
+        self.assertEqual(self.window.paper_trade_table.item(0, 2).text(), "2")
+        self.assertEqual(self.window.paper_trade_table.item(0, 3).text(), "5x")
         self.assertGreaterEqual(len(self.window.paper_equity_history), 1)
-        self.assertGreaterEqual(len(self.window.paper_trade_chart_canvas.trade_ax.collections), 1)
+        self.assertGreaterEqual(len(self.window.forecast_canvas.price_ax.collections), 1)
 
     def test_disable_paper_trading_blocks_new_local_entries(self):
         payload = build_paper_entry_payload()
@@ -434,6 +484,20 @@ class TestQtGuiIntegration(unittest.TestCase):
         self.assertIsNone(self.window.paper_position)
         self.assertEqual(self.window.paper_trade_table.rowCount(), 0)
         self.assertEqual(self.window.paper_signal_card.value_label.text(), "DISABLED")
+
+    def test_non_paper_execution_mode_stays_monitor_only(self):
+        payload = build_paper_entry_payload()
+
+        self.window.execution_mode_combo.setCurrentIndex(1)
+        self.app.processEvents()
+        self.window.active_run_id = 1
+        self.window.on_prediction_ready(payload, predictor=MagicMock(), run_id=1, auto_run=False)
+        self.app.processEvents()
+
+        self.assertEqual(self.window.execution_mode, "testnet")
+        self.assertIsNone(self.window.paper_position)
+        self.assertEqual(self.window.paper_trade_table.rowCount(), 0)
+        self.assertEqual(self.window.paper_signal_card.value_label.text(), "MONITOR")
 
     def test_reset_paper_account_clears_tables_and_history(self):
         payload = build_paper_entry_payload()
@@ -463,6 +527,22 @@ class TestQtGuiIntegration(unittest.TestCase):
         self.assertIsNone(self.window.paper_position)
         self.assertEqual(self.window.paper_trade_table.rowCount(), 0)
         self.assertIn("250,000", self.window.paper_status_label.text())
+
+    def test_paper_account_summary_updates_after_round_trip(self):
+        self.window.paper_risk_checkbox.setChecked(False)
+        self.app.processEvents()
+        self.window.paper_order_qty_spin.setValue(2.0)
+        self.window.active_run_id = 1
+        self.window.on_prediction_ready(build_paper_entry_payload(), predictor=MagicMock(), run_id=1, auto_run=False)
+        self.app.processEvents()
+
+        self.window.active_run_id = 2
+        self.window.on_prediction_ready(build_paper_exit_payload(), predictor=MagicMock(), run_id=2, auto_run=False)
+        self.app.processEvents()
+
+        self.assertIsNone(self.window.paper_position)
+        self.assertEqual(self.window.paper_trades_card.value_label.text(), "1")
+        self.assertAlmostEqual(self.window.paper_realized_equity, 1007.0)
 
 
 if __name__ == "__main__":

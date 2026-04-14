@@ -36,6 +36,8 @@ try:
         QPushButton,
         QCheckBox,
         QSpinBox,
+        QSplitter,
+        QSizePolicy,
         QStatusBar,
         QTableWidget,
         QTableWidgetItem,
@@ -43,6 +45,7 @@ try:
         QTextEdit,
         QVBoxLayout,
         QWidget,
+        QScrollArea,
     )
     QT_API = "PyQt5"
 except ImportError:
@@ -64,6 +67,8 @@ except ImportError:
         QPushButton,
         QCheckBox,
         QSpinBox,
+        QSplitter,
+        QSizePolicy,
         QStatusBar,
         QTableWidget,
         QTableWidgetItem,
@@ -71,6 +76,7 @@ except ImportError:
         QTextEdit,
         QVBoxLayout,
         QWidget,
+        QScrollArea,
     )
     QT_API = "PyQt6"
 
@@ -195,6 +201,10 @@ def format_signed_pct(value):
     return f"{value * 100:+.2f}%"
 
 
+def format_quantity(value):
+    return f"{value:,.4f}".rstrip("0").rstrip(".")
+
+
 def default_lookback_for_context(context_length, pred_len):
     return max(50, context_length - pred_len)
 
@@ -221,8 +231,8 @@ class MetricCard(QFrame):
         super().__init__()
         self.setObjectName("metricCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(2)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(1)
 
         title_label = QLabel(title)
         title_label.setObjectName("metricTitle")
@@ -253,7 +263,7 @@ class TerminalBadge(QLabel):
 class PriceChartCanvas(FigureCanvas):
     def __init__(self, chart_type="price"):
         self.chart_type = chart_type
-        self.figure = Figure(figsize=(8.8, 6.4), facecolor="#151515")
+        self.figure = Figure(figsize=(8.8, 4.8), facecolor="#151515")
         super().__init__(self.figure)
         self.setStyleSheet("background: transparent;")
         if chart_type == "price":
@@ -361,6 +371,7 @@ class PriceChartCanvas(FigureCanvas):
         context_df,
         future_pred_df,
         forecast_interval_df=None,
+        paper_trades=None,
     ):
         self.figure.clear()
         self.price_ax = self.figure.add_subplot(111)
@@ -405,6 +416,31 @@ class PriceChartCanvas(FigureCanvas):
             label="Forecast close",
             zorder=3,
         )
+        filtered_trades = [
+            trade for trade in (paper_trades or [])
+            if trade.get("symbol") == symbol and trade.get("timeframe") == timeframe
+        ]
+        trade_styles = {
+            "enter_long": {"marker": "^", "color": "#22c55e", "label": "Enter long"},
+            "enter_short": {"marker": "v", "color": "#ef4444", "label": "Enter short"},
+            "exit_long": {"marker": "X", "color": "#f59e0b", "label": "Exit long"},
+            "exit_short": {"marker": "X", "color": "#38bdf8", "label": "Exit short"},
+        }
+        for action, style in trade_styles.items():
+            action_trades = [trade for trade in filtered_trades if trade["action"] == action]
+            if not action_trades:
+                continue
+            self.price_ax.scatter(
+                [trade["time"] for trade in action_trades],
+                [trade["price"] for trade in action_trades],
+                marker=style["marker"],
+                s=58,
+                color=style["color"],
+                edgecolors="#fafafa",
+                linewidths=0.6,
+                label=style["label"],
+                zorder=6,
+            )
         self.price_ax.axvline(
             history_chart_df["timestamps"].iloc[-1],
             color="#a1a1aa",
@@ -573,7 +609,7 @@ class PriceChartCanvas(FigureCanvas):
 
 class EquityCurveCanvas(FigureCanvas):
     def __init__(self):
-        self.figure = Figure(figsize=(8.6, 3.0), facecolor="#151515")
+        self.figure = Figure(figsize=(8.6, 2.4), facecolor="#151515")
         super().__init__(self.figure)
         self.setStyleSheet("background: transparent;")
         self.draw_empty()
@@ -657,7 +693,7 @@ class EquityCurveCanvas(FigureCanvas):
 
 class PaperTradeChartCanvas(FigureCanvas):
     def __init__(self):
-        self.figure = Figure(figsize=(8.6, 3.6), facecolor="#151515")
+        self.figure = Figure(figsize=(8.6, 2.8), facecolor="#151515")
         super().__init__(self.figure)
         self.setStyleSheet("background: transparent;")
         self.draw_empty()
@@ -761,6 +797,29 @@ class PaperTradeChartCanvas(FigureCanvas):
 class KronosGUI(QMainWindow):
     dispatch = pyqtSignal(object)
 
+    _PAPER_ACTION_LABELS = {
+        "enter_long": "ENTER LONG",
+        "enter_short": "ENTER SHORT",
+        "exit_long": "EXIT LONG",
+        "exit_short": "EXIT SHORT",
+        "hold": "HOLD",
+        "no_action": "NO ACTION",
+    }
+
+    _PAPER_REASON_LABELS = {
+        "long_signal_confirmed": "Long entry: forecast & validation trend confirm.",
+        "short_signal_confirmed": "Short entry: forecast & validation trend confirm.",
+        "entry_conditions_not_met": "Forecast edge or validation not aligned.",
+        "stop_loss_hit": "Stop loss triggered.",
+        "take_profit_hit": "Take profit triggered!",
+        "long_signal_invalidated": "Long invalidated: trend reversed.",
+        "short_signal_invalidated": "Short invalidated: trend reversed.",
+        "long_position_still_valid": "Long valid: trend intact.",
+        "short_position_still_valid": "Short valid: trend intact.",
+        "missing_validation_data": "Validation data not ready.",
+        "unknown_position_side": "Unknown position side.",
+    }
+
     def __init__(self):
         super().__init__()
         self.predictor = None
@@ -785,9 +844,15 @@ class KronosGUI(QMainWindow):
         self.paper_last_snapshot = None
         self.paper_last_decision = None
         self.paper_realized_pnl_pct = 0.0
-        self.paper_initial_equity = 100000.0
+        self.paper_initial_equity = 1000.0
+        self.paper_realized_equity = self.paper_initial_equity
         self.paper_enabled = True
         self.paper_latest_market_df = None
+        self.execution_mode = "paper"
+        self.paper_order_quantity = 0.01
+        self.paper_order_leverage = 5
+        self.paper_use_risk_fraction = True
+        self.paper_risk_fraction = 0.08
         self.init_ui()
         self.show()
 
@@ -817,7 +882,7 @@ class KronosGUI(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("Kronos BTC Forecast Terminal")
-        self.setGeometry(90, 90, 1380, 900)
+        self.setGeometry(80, 60, 1600, 1000)
         self.setStyleSheet(
             """
             QMainWindow, QWidget {
@@ -886,7 +951,7 @@ class KronosGUI(QMainWindow):
             }
             QLabel#titleLabel {
                 color: #fafafa;
-                font-size: 22px;
+                font-size: 18px;
                 font-weight: 700;
             }
             QLabel#subtitleLabel {
@@ -899,7 +964,7 @@ class KronosGUI(QMainWindow):
             }
             QLabel#metricValue {
                 color: #f8fafc;
-                font-size: 18px;
+                font-size: 15px;
                 font-weight: 700;
             }
             QLabel#metricDetail {
@@ -914,10 +979,10 @@ class KronosGUI(QMainWindow):
             QLabel#tagLabel {
                 background: #232326;
                 border: 1px solid #3f3f46;
-                border-radius: 5px;
+                border-radius: 4px;
                 color: #d4d4d8;
-                padding: 4px 8px;
-                font-size: 10px;
+                padding: 2px 6px;
+                font-size: 9px;
                 font-weight: 600;
             }
             QStatusBar {
@@ -1107,83 +1172,56 @@ class KronosGUI(QMainWindow):
 
         header = QFrame()
         header.setObjectName("metricCard")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(14, 12, 14, 12)
-        header_layout.setSpacing(6)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+        header_layout.setSpacing(12)
+
+        left_panel = QVBoxLayout()
+        left_panel.setSpacing(2)
+        left_panel.setContentsMargins(0, 0, 0, 0)
 
         self.title_label = QLabel("Kronos BTC Forecast Terminal")
         self.title_label.setObjectName("titleLabel")
-        header_layout.addWidget(self.title_label)
+        left_panel.addWidget(self.title_label)
 
-        self.subtitle_label = QLabel("Load an engine, pull the latest futures candles, and inspect the next forecast window.")
+        self.subtitle_label = QLabel("Load engine → fetch Binance futures → forecast")
         self.subtitle_label.setObjectName("subtitleLabel")
-        self.subtitle_label.setWordWrap(True)
-        header_layout.addWidget(self.subtitle_label)
+        self.subtitle_label.setStyleSheet("color: #71717a; font-size: 10px;")
+        left_panel.addWidget(self.subtitle_label)
 
         badge_row = QHBoxLayout()
-        badge_row.setContentsMargins(0, 0, 0, 0)
-        badge_row.setSpacing(8)
-        self.symbol_badge = TerminalBadge("PAIR  BTC/USDT")
-        self.timeframe_badge = TerminalBadge("TF  4H")
-        self.model_badge = TerminalBadge("ENGINE  --")
-        self.feed_badge = TerminalBadge("FEED  IDLE")
+        badge_row.setSpacing(6)
+        self.symbol_badge = TerminalBadge("BTC/USDT")
+        self.timeframe_badge = TerminalBadge("4H")
+        self.model_badge = TerminalBadge("--")
+        self.feed_badge = TerminalBadge("IDLE")
         badge_row.addWidget(self.symbol_badge)
         badge_row.addWidget(self.timeframe_badge)
         badge_row.addWidget(self.model_badge)
         badge_row.addWidget(self.feed_badge)
-        badge_row.addStretch()
-        header_layout.addLayout(badge_row)
-        layout.addWidget(header)
+        left_panel.addLayout(badge_row)
+        header_layout.addLayout(left_panel, 1)
 
-        metrics_frame = QFrame()
-        metrics_layout = QGridLayout(metrics_frame)
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(8)
         metrics_layout.setContentsMargins(0, 0, 0, 0)
-        metrics_layout.setHorizontalSpacing(10)
-        metrics_layout.setVerticalSpacing(10)
 
-        self.latest_card = MetricCard("Latest Close", "#38bdf8")
-        self.forecast_card = MetricCard("Forecast End", "#f59e0b")
-        self.move_card = MetricCard("Forecast Move", "#22c55e")
-        self.mape_card = MetricCard("Recent MAPE", "#a78bfa")
+        self.latest_card = MetricCard("Last", "#38bdf8")
+        self.forecast_card = MetricCard("Fcst End", "#f59e0b")
+        self.move_card = MetricCard("Move", "#22c55e")
+        self.mape_card = MetricCard("MAPE", "#a78bfa")
 
-        metrics_layout.addWidget(self.latest_card, 0, 0)
-        metrics_layout.addWidget(self.forecast_card, 0, 1)
-        metrics_layout.addWidget(self.move_card, 1, 0)
-        metrics_layout.addWidget(self.mape_card, 1, 1)
-        layout.addWidget(metrics_frame)
+        metrics_layout.addWidget(self.latest_card)
+        metrics_layout.addWidget(self.forecast_card)
+        metrics_layout.addWidget(self.move_card)
+        metrics_layout.addWidget(self.mape_card)
+        header_layout.addLayout(metrics_layout, 2)
+        layout.addWidget(header)
 
         self.main_tabs = QTabWidget()
         self.main_tabs.setStyleSheet("QTabWidget::pane { border: none; }")
-        
-        forecast_tab = QWidget()
-        forecast_layout = QVBoxLayout(forecast_tab)
-        forecast_layout.setContentsMargins(10, 10, 10, 10)
-        forecast_layout.setSpacing(8)
-        self.forecast_canvas = PriceChartCanvas(chart_type="price")
-        forecast_layout.addWidget(self.forecast_canvas)
-        self.main_tabs.addTab(forecast_tab, "Forecast")
-        
-        validation_tab = QWidget()
-        validation_layout = QVBoxLayout(validation_tab)
-        validation_layout.setContentsMargins(10, 10, 10, 10)
-        validation_layout.setSpacing(8)
-        self.validation_canvas = PriceChartCanvas(chart_type="validation")
-        validation_layout.addWidget(self.validation_canvas)
-        self.main_tabs.addTab(validation_tab, "Validation")
-
-        paper_tab = self.create_paper_tab()
-        self.main_tabs.addTab(paper_tab, "Paper Mode")
-
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
-        log_layout.setContentsMargins(10, 10, 10, 10)
-        self.results_text = QTextEdit()
-        self.results_text.setReadOnly(True)
-        self.results_text.setPlaceholderText(
-            "Forecast details and run log will appear here."
-        )
-        log_layout.addWidget(self.results_text)
-        self.main_tabs.addTab(log_tab, "Log")
+        self.main_tabs.addTab(self.create_market_tab(), "Market")
+        self.main_tabs.addTab(self.create_execution_tab(), "Execution")
         
         layout.addWidget(self.main_tabs)
 
@@ -1196,164 +1234,241 @@ class KronosGUI(QMainWindow):
         self.move_card.set_content("--", "Predicted direction")
         self.mape_card.set_content("--", "Recent validation")
 
-    def create_paper_tab(self):
+    def create_market_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
-        hint_label = QLabel("Local paper mode evaluates one signal per closed candle and simulates entries, exits, and stop loss on-device.")
-        hint_label.setWordWrap(True)
-        hint_label.setStyleSheet("color: #a1a1aa;")
-        layout.addWidget(hint_label)
+        self.market_splitter = QSplitter(Qt.Vertical)
 
-        controls_frame = QFrame()
-        controls_frame.setObjectName("metricCard")
-        controls_layout = QGridLayout(controls_frame)
-        controls_layout.setContentsMargins(12, 10, 12, 10)
-        controls_layout.setHorizontalSpacing(10)
-        controls_layout.setVerticalSpacing(8)
+        forecast_group = QGroupBox("Forecast")
+        forecast_layout = QVBoxLayout(forecast_group)
+        forecast_layout.setContentsMargins(8, 8, 8, 8)
+        forecast_layout.setSpacing(4)
+        self.forecast_canvas = PriceChartCanvas(chart_type="price")
+        self.forecast_canvas.setMinimumHeight(200)
+        forecast_layout.addWidget(self.forecast_canvas)
+        self.market_splitter.addWidget(forecast_group)
 
-        self.paper_enable_checkbox = QCheckBox("Enable Paper Trading")
+        validation_group = QGroupBox("Validation")
+        validation_layout = QVBoxLayout(validation_group)
+        validation_layout.setContentsMargins(8, 8, 8, 8)
+        validation_layout.setSpacing(4)
+        self.validation_canvas = PriceChartCanvas(chart_type="validation")
+        self.validation_canvas.setMinimumHeight(160)
+        validation_layout.addWidget(self.validation_canvas)
+        self.market_splitter.addWidget(validation_group)
+
+        self.market_splitter.setStretchFactor(0, 3)
+        self.market_splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.market_splitter)
+
+        return tab
+
+    def create_execution_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        top_controls = QFrame()
+        top_controls.setObjectName("metricCard")
+        top_layout = QHBoxLayout(top_controls)
+        top_layout.setContentsMargins(10, 6, 10, 6)
+        top_layout.setSpacing(10)
+
+        top_layout.addWidget(QLabel("Mode"))
+        self.execution_mode_combo = QComboBox()
+        self.execution_mode_combo.addItem("Paper", "paper")
+        self.execution_mode_combo.addItem("Testnet (Soon)", "testnet")
+        self.execution_mode_combo.addItem("Live (Locked)", "live")
+        self.execution_mode_combo.setCurrentIndex(0)
+        self.execution_mode_combo.currentIndexChanged.connect(self.on_execution_mode_changed)
+        top_layout.addWidget(self.execution_mode_combo)
+
+        self.paper_enable_checkbox = QCheckBox("Enable")
         self.paper_enable_checkbox.setChecked(self.paper_enabled)
         self.paper_enable_checkbox.toggled.connect(self.on_paper_trading_toggled)
-        controls_layout.addWidget(self.paper_enable_checkbox, 0, 0)
+        top_layout.addWidget(self.paper_enable_checkbox)
 
-        controls_layout.addWidget(QLabel("Initial Equity"), 0, 1)
+        top_layout.addWidget(QLabel("Equity"))
         self.paper_initial_equity_spin = QDoubleSpinBox()
         self.paper_initial_equity_spin.setRange(1000.0, 100000000.0)
         self.paper_initial_equity_spin.setDecimals(0)
         self.paper_initial_equity_spin.setSingleStep(1000.0)
         self.paper_initial_equity_spin.setValue(self.paper_initial_equity)
         self.paper_initial_equity_spin.valueChanged.connect(self.on_paper_initial_equity_changed)
-        controls_layout.addWidget(self.paper_initial_equity_spin, 0, 2)
+        self.paper_initial_equity_spin.setMaximumWidth(110)
+        top_layout.addWidget(self.paper_initial_equity_spin)
 
-        self.paper_reset_btn = QPushButton("Reset Paper Account")
+        self.paper_reset_btn = QPushButton("Reset")
         self.paper_reset_btn.clicked.connect(self.reset_paper_account)
-        controls_layout.addWidget(self.paper_reset_btn, 0, 3)
-        layout.addWidget(controls_frame)
+        top_layout.addWidget(self.paper_reset_btn)
 
-        metrics_frame = QFrame()
-        metrics_layout = QGridLayout(metrics_frame)
-        metrics_layout.setContentsMargins(0, 0, 0, 0)
-        metrics_layout.setHorizontalSpacing(10)
-        metrics_layout.setVerticalSpacing(10)
+        top_layout.addSpacing(20)
+
+        top_layout.addWidget(QLabel("Qty"))
+        self.paper_order_qty_spin = QDoubleSpinBox()
+        self.paper_order_qty_spin.setDecimals(4)
+        self.paper_order_qty_spin.setRange(0.0001, 1000000.0)
+        self.paper_order_qty_spin.setSingleStep(0.001)
+        self.paper_order_qty_spin.setValue(self.paper_order_quantity)
+        self.paper_order_qty_spin.valueChanged.connect(self.on_paper_order_value_changed)
+        self.paper_order_qty_spin.setMaximumWidth(90)
+        top_layout.addWidget(self.paper_order_qty_spin)
+
+        top_layout.addWidget(QLabel("Lev"))
+        self.paper_leverage_spin = QSpinBox()
+        self.paper_leverage_spin.setRange(1, 125)
+        self.paper_leverage_spin.setValue(self.paper_order_leverage)
+        self.paper_leverage_spin.valueChanged.connect(self.on_paper_order_value_changed)
+        self.paper_leverage_spin.setMaximumWidth(55)
+        top_layout.addWidget(self.paper_leverage_spin)
+
+        self.paper_risk_checkbox = QCheckBox("Risk%")
+        self.paper_risk_checkbox.toggled.connect(self.on_paper_risk_toggled)
+        self.paper_risk_checkbox.setChecked(self.paper_use_risk_fraction)
+        top_layout.addWidget(self.paper_risk_checkbox)
+
+        self.paper_risk_spin = QDoubleSpinBox()
+        self.paper_risk_spin.setDecimals(2)
+        self.paper_risk_spin.setRange(0.1, 50.0)
+        self.paper_risk_spin.setSuffix("%")
+        self.paper_risk_spin.setValue(self.paper_risk_fraction * 100)
+        self.paper_risk_spin.valueChanged.connect(self.on_paper_risk_changed)
+        self.paper_risk_spin.setMaximumWidth(70)
+        top_layout.addWidget(self.paper_risk_spin)
+
+        top_layout.addWidget(QLabel("Notional"))
+        self.paper_notional_value = QLabel("--")
+        self.paper_notional_value.setStyleSheet("color: #f5f5f5; font-weight: 600;")
+        top_layout.addWidget(self.paper_notional_value)
+
+        top_layout.addWidget(QLabel("Margin"))
+        self.paper_margin_value = QLabel("--")
+        self.paper_margin_value.setStyleSheet("color: #f5f5f5; font-weight: 600;")
+        top_layout.addWidget(self.paper_margin_value)
+
+        top_layout.addStretch()
+        layout.addWidget(top_controls)
+
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(6)
 
         self.paper_signal_card = MetricCard("Signal", "#38bdf8")
         self.paper_position_card = MetricCard("Position", "#f59e0b")
-        self.paper_stop_card = MetricCard("Stop", "#ef4444")
         self.paper_pnl_card = MetricCard("PnL", "#22c55e")
+        self.paper_trades_card = MetricCard("Trades", "#f59e0b")
+        self.paper_equity_card = MetricCard("Equity", "#22c55e")
 
-        metrics_layout.addWidget(self.paper_signal_card, 0, 0)
-        metrics_layout.addWidget(self.paper_position_card, 0, 1)
-        metrics_layout.addWidget(self.paper_stop_card, 1, 0)
-        metrics_layout.addWidget(self.paper_pnl_card, 1, 1)
-        layout.addWidget(metrics_frame)
-
-        self.paper_status_label = QLabel("")
-        self.paper_status_label.setWordWrap(True)
-        self.paper_status_label.setStyleSheet("color: #d4d4d8;")
-        layout.addWidget(self.paper_status_label)
-
-        self.paper_snapshot_text = QTextEdit()
-        self.paper_snapshot_text.setReadOnly(True)
-        self.paper_snapshot_text.setPlaceholderText("Latest paper mode signal snapshot will appear here.")
-        
-        top_grid = QGridLayout()
-        top_grid.setContentsMargins(0, 0, 0, 0)
-        top_grid.setHorizontalSpacing(10)
-        top_grid.setVerticalSpacing(10)
+        for card in [self.paper_signal_card, self.paper_position_card, self.paper_pnl_card,
+                     self.paper_trades_card, self.paper_equity_card]:
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            metrics_layout.addWidget(card)
+        layout.addLayout(metrics_layout)
 
         position_group = QGroupBox("Position Watch")
         position_layout = QVBoxLayout(position_group)
-        position_layout.setContentsMargins(10, 10, 10, 10)
-        position_layout.setSpacing(8)
-        self.paper_position_table = QTableWidget(1, 6)
+        position_layout.setContentsMargins(6, 6, 6, 6)
+        position_layout.setSpacing(4)
+        self.paper_position_table = QTableWidget(1, 11)
         self.paper_position_table.setHorizontalHeaderLabels(
-            ["Side", "Entry Time", "Entry", "Mark", "Stop", "Unrealized"]
+            ["Side", "Entry", "Qty", "Lev", "EntryPx", "Mark", "Notional", "Margin", "Stop", "TP", "Unreal"]
         )
         self.paper_position_table.verticalHeader().setVisible(False)
         self.paper_position_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.paper_position_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.paper_position_table.horizontalHeader().setSectionResizeMode(HEADER_STRETCH)
+        self.paper_position_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.paper_position_table.setRowHeight(0, 28)
         position_layout.addWidget(self.paper_position_table)
-        position_layout.addWidget(self.paper_snapshot_text)
-        top_grid.addWidget(position_group, 0, 0)
-
-        equity_group = QGroupBox("Equity Curve")
-        equity_layout = QVBoxLayout(equity_group)
-        equity_layout.setContentsMargins(10, 10, 10, 10)
-        equity_layout.setSpacing(8)
-        self.paper_equity_canvas = EquityCurveCanvas()
-        equity_layout.addWidget(self.paper_equity_canvas)
-        top_grid.addWidget(equity_group, 0, 1)
-
-        layout.addLayout(top_grid, 1)
-
-        trade_chart_group = QGroupBox("Trade Overlay")
-        trade_chart_layout = QVBoxLayout(trade_chart_group)
-        trade_chart_layout.setContentsMargins(10, 10, 10, 10)
-        trade_chart_layout.setSpacing(8)
-        self.paper_trade_chart_canvas = PaperTradeChartCanvas()
-        trade_chart_layout.addWidget(self.paper_trade_chart_canvas)
-        layout.addWidget(trade_chart_group, 1)
+        layout.addWidget(position_group)
 
         trade_group = QGroupBox("Trade Ledger")
         trade_layout = QVBoxLayout(trade_group)
-        trade_layout.setContentsMargins(10, 10, 10, 10)
-        trade_layout.setSpacing(8)
-        self.paper_trade_table = QTableWidget(0, 8)
+        trade_layout.setContentsMargins(6, 6, 6, 6)
+        trade_layout.setSpacing(4)
+        self.paper_trade_table = QTableWidget(0, 11)
         self.paper_trade_table.setHorizontalHeaderLabels(
-            ["Time", "Action", "Price", "Stop", "Forecast", "Val Pred", "Val Actual", "PnL"]
+            ["Time", "Action", "Qty", "Lev", "Price", "Notional", "Stop", "TP", "P&L", "Fcst", "Reason"]
         )
         self.paper_trade_table.verticalHeader().setVisible(False)
         self.paper_trade_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.paper_trade_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.paper_trade_table.horizontalHeader().setSectionResizeMode(HEADER_STRETCH)
+        self.paper_trade_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.paper_trade_table.setMinimumHeight(100)
+        self.paper_trade_table.verticalHeader().setDefaultSectionSize(24)
         trade_layout.addWidget(self.paper_trade_table)
+        layout.addWidget(trade_group)
 
-        self.paper_trade_log = QTextEdit()
-        self.paper_trade_log.setReadOnly(True)
-        self.paper_trade_log.setPlaceholderText("Local paper trades will appear here.")
-        trade_layout.addWidget(self.paper_trade_log)
-        layout.addWidget(trade_group, 1)
+        self.paper_status_label = QLabel("")
+        self.paper_status_label.setWordWrap(True)
+        self.paper_status_label.setStyleSheet("color: #71717a; font-size: 10px;")
+        layout.addWidget(self.paper_status_label)
+
+        self.results_text = QTextEdit()
+        self.results_text.setReadOnly(True)
+        self.results_text.setMinimumHeight(120)
+        self.results_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.results_text.setPlaceholderText("Log...")
+        layout.addWidget(self.results_text)
 
         self.set_paper_defaults()
         return tab
 
     def set_paper_defaults(self):
         if hasattr(self, "paper_signal_card"):
-            self.paper_signal_card.set_content("WAIT", "Waiting for a completed forecast")
+            self.paper_signal_card.set_content("WAIT", "Waiting for forecast")
         if hasattr(self, "paper_position_card"):
-            self.paper_position_card.set_content("FLAT", "No local paper position")
-        if hasattr(self, "paper_stop_card"):
-            self.paper_stop_card.set_content("--", "Stop price will arm on entry")
+            self.paper_position_card.set_content("FLAT", "No position")
         if hasattr(self, "paper_pnl_card"):
-            self.paper_pnl_card.set_content("$0", "Realized +0.00% | Unrealized +0.00%")
+            self.paper_pnl_card.set_content("$0", "+0.00% realized")
+        if hasattr(self, "paper_trades_card"):
+            self.paper_trades_card.set_content("0", "Closed trades")
         if hasattr(self, "paper_status_label"):
-            self.paper_status_label.setText("Local paper mode is idle until forecast and validation data are both ready.")
-        if hasattr(self, "paper_snapshot_text"):
-            self.paper_snapshot_text.setPlainText("")
-        if hasattr(self, "paper_trade_log"):
-            self.paper_trade_log.setPlainText("")
+            self.paper_status_label.setText("Paper mode idle - run forecast to begin.")
         if hasattr(self, "paper_position_table"):
             for col in range(self.paper_position_table.columnCount()):
                 self.paper_position_table.setItem(0, col, QTableWidgetItem("--"))
         if hasattr(self, "paper_trade_table"):
             self.paper_trade_table.setRowCount(0)
-        if hasattr(self, "paper_equity_canvas"):
-            self.paper_equity_canvas.draw_empty()
-        if hasattr(self, "paper_trade_chart_canvas"):
-            self.paper_trade_chart_canvas.draw_empty()
+        if hasattr(self, "paper_equity_card"):
+            self.paper_equity_card.set_content(format_price(self.paper_initial_equity), "+0.00%")
+        self.update_execution_order_preview()
 
     def on_paper_trading_toggled(self, checked):
         self.paper_enabled = bool(checked)
-        if self.paper_enabled:
+        if self.paper_trading_active():
             self.paper_status_label.setText("Paper trading enabled. The next completed forecast candle can open or close local positions.")
+        elif self.paper_enabled:
+            self.paper_status_label.setText("Paper trading is armed, but only Local Paper mode can execute right now.")
         else:
             self.paper_last_decision = None
             self.paper_status_label.setText("Paper trading disabled. Signals are visible, but no local entries or exits will be simulated.")
         self.render_paper_mode()
+
+    def on_execution_mode_changed(self, index):
+        self.execution_mode = self.execution_mode_combo.itemData(index) or "paper"
+        self.update_execution_order_preview()
+        self.render_paper_mode()
+
+    def on_paper_order_value_changed(self, value):
+        del value
+        self.paper_order_quantity = float(self.paper_order_qty_spin.value())
+        self.paper_order_leverage = int(self.paper_leverage_spin.value())
+        self.update_execution_order_preview()
+
+    def on_paper_risk_toggled(self, checked):
+        self.paper_use_risk_fraction = checked
+        self.paper_order_qty_spin.setVisible(not checked)
+        self.paper_leverage_spin.setVisible(not checked)
+        self.update_execution_order_preview()
+
+    def on_paper_risk_changed(self, value):
+        self.paper_risk_fraction = float(value) / 100.0
+        self.update_execution_order_preview()
+        if self.paper_last_snapshot is not None:
+            self.render_paper_mode()
 
     def on_paper_initial_equity_changed(self, value):
         value = float(value)
@@ -1369,6 +1484,7 @@ class KronosGUI(QMainWindow):
         self.paper_trade_history = []
         self.paper_equity_history = []
         self.paper_realized_pnl_pct = 0.0
+        self.paper_realized_equity = self.paper_initial_equity
         self.paper_last_decision = None
         self.paper_last_snapshot = None
         self.paper_latest_market_df = None
@@ -1377,6 +1493,67 @@ class KronosGUI(QMainWindow):
             self.paper_status_label.setText(
                 reason or f"Paper account reset. Starting equity {format_price(self.paper_initial_equity)}."
             )
+        self.update_execution_order_preview()
+
+    def paper_trading_active(self):
+        return self.paper_enabled and self.execution_mode == "paper"
+
+    def current_execution_price(self):
+        if self.paper_last_snapshot is not None:
+            return float(self.paper_last_snapshot.current_price)
+        if self.paper_position is not None:
+            return float(self.paper_position.entry_price)
+        if self.paper_latest_market_df is not None and not self.paper_latest_market_df.empty:
+            return float(self.paper_latest_market_df["close"].iloc[-1])
+        return None
+
+    def current_order_quantity(self):
+        return max(0.0001, float(getattr(self, "paper_order_qty_spin", None).value() if hasattr(self, "paper_order_qty_spin") else self.paper_order_quantity))
+
+    def current_order_leverage(self):
+        return max(1, int(getattr(self, "paper_leverage_spin", None).value() if hasattr(self, "paper_leverage_spin") else self.paper_order_leverage))
+
+    def current_order_quantity_by_risk(self, entry_price, stop_distance_pct):
+        equity = self.current_paper_equity()
+        risk_amount = equity * self.paper_risk_fraction
+        stop_distance_price = entry_price * stop_distance_pct
+        if stop_distance_price <= 0:
+            return self.current_order_quantity()
+        qty = risk_amount / stop_distance_price
+        return max(0.0001, qty)
+
+    def current_order_notional(self, price=None, quantity=None):
+        mark_price = self.current_execution_price() if price is None else float(price)
+        if mark_price is None:
+            return None
+        qty = self.current_order_quantity() if quantity is None else float(quantity)
+        return mark_price * qty
+
+    def current_order_margin(self, price=None, quantity=None, leverage=None):
+        notional = self.current_order_notional(price=price, quantity=quantity)
+        if notional is None:
+            return None
+        lev = self.current_order_leverage() if leverage is None else int(leverage)
+        return notional / max(1, lev)
+
+    def update_execution_order_preview(self):
+        price = self.current_execution_price()
+        notional = self.current_order_notional(price=price)
+        margin = self.current_order_margin(price=price)
+        if hasattr(self, "paper_notional_value"):
+            self.paper_notional_value.setText(format_price(notional) if notional is not None else "--")
+        if hasattr(self, "paper_margin_value"):
+            self.paper_margin_value.setText(format_price(margin) if margin is not None else "--")
+        if hasattr(self, "execution_mode_hint"):
+            if self.execution_mode == "paper":
+                mode_text = "Local Paper mode 會用目前數量與槓桿做本地模擬，尚未送出任何交易所委託。"
+            elif self.execution_mode == "testnet":
+                mode_text = "Binance testnet 入口已預留，現在仍只做本地模擬，不會對 testnet 下單。"
+            else:
+                mode_text = "Live mode 開關已預留，目前鎖定；執行層仍停留在本地 paper mode。"
+            if price is not None:
+                mode_text += f" 估算基準價 {format_price(price)}。"
+            self.execution_mode_hint.setText(mode_text)
 
     def update_badges(self, *, feed_status=None):
         symbol = getattr(self, "current_symbol", "BTC/USDT")
@@ -1441,7 +1618,9 @@ class KronosGUI(QMainWindow):
         self.set_busy()
 
     def append_log(self, message):
-        self.results_text.append(message)
+        if hasattr(self, "results_text") and self.results_text is not None:
+            self.results_text.append(message)
+        print(message)
 
     def set_busy(self, *, loading=False, fetching=False, predicting=False):
         busy = loading or fetching or predicting
@@ -1463,42 +1642,36 @@ class KronosGUI(QMainWindow):
         self.progress.setVisible(busy)
 
     def describe_paper_action(self, action):
-        labels = {
-            "enter_long": "ENTER LONG",
-            "enter_short": "ENTER SHORT",
-            "exit_long": "EXIT LONG",
-            "exit_short": "EXIT SHORT",
-            "hold": "HOLD",
-            "no_action": "NO ACTION",
-        }
-        return labels.get(action, action.upper())
+        return self._PAPER_ACTION_LABELS.get(action, action.upper())
 
     def describe_paper_reason(self, reason):
-        labels = {
-            "forecast_upside_and_validation_trend_confirm_long": "Forecast upside and validation trend both confirm a long entry.",
-            "forecast_downside_and_validation_trend_confirm_short": "Forecast downside and validation trend both confirm a short entry.",
-            "entry_conditions_not_met": "Forecast edge or validation alignment is not strong enough yet.",
-            "stop_loss_hit": "Current price crossed the local stop boundary.",
-            "long_signal_invalidated": "Long setup lost support from forecast or validation trend.",
-            "short_signal_invalidated": "Short setup lost support from forecast or validation trend.",
-            "long_position_still_valid": "Long setup still agrees with forecast and validation trend.",
-            "short_position_still_valid": "Short setup still agrees with forecast and validation trend.",
-            "missing_validation_data": "Validation data is not ready, so paper mode is waiting.",
-        }
-        return labels.get(reason, reason.replace("_", " ").capitalize())
+        return self._PAPER_REASON_LABELS.get(reason, reason.replace("_", " ").capitalize())
 
     def compute_position_return_pct(self, position, current_price):
         if position.side == "long":
             return (current_price / position.entry_price) - 1.0
         return (position.entry_price / current_price) - 1.0
 
-    def current_paper_equity(self, unrealized_pct=0.0):
-        return self.paper_initial_equity * (1.0 + self.paper_realized_pnl_pct + unrealized_pct)
+    def compute_position_pnl_amount(self, position, current_price):
+        if position.side == "long":
+            return (current_price - position.entry_price) * position.quantity
+        return (position.entry_price - current_price) * position.quantity
 
-    def append_paper_equity_point(self, snapshot, unrealized_pct):
+    def compute_position_notional(self, position, price=None):
+        mark_price = float(position.entry_price if price is None else price)
+        return mark_price * position.quantity
+
+    def compute_position_margin(self, position, price=None):
+        notional = self.compute_position_notional(position, price=price)
+        return notional / max(1, position.leverage)
+
+    def current_paper_equity(self, unrealized_amount=0.0):
+        return self.paper_realized_equity + unrealized_amount
+
+    def append_paper_equity_point(self, snapshot, unrealized_amount):
         point = {
             "time": pd.Timestamp(snapshot.signal_time),
-            "equity": self.current_paper_equity(unrealized_pct),
+            "equity": self.current_paper_equity(unrealized_amount),
         }
         if self.paper_equity_history and self.paper_equity_history[-1]["time"] == point["time"]:
             self.paper_equity_history[-1] = point
@@ -1507,19 +1680,72 @@ class KronosGUI(QMainWindow):
         self.paper_equity_history = self.paper_equity_history[-240:]
 
     def set_table_item(self, table, row, column, value):
+        existing = table.item(row, column)
+        if existing is not None and existing.text() == value:
+            return
         table.setItem(row, column, QTableWidgetItem(value))
 
-    def record_paper_trade(self, *, action, snapshot, reason, stop_price=None, pnl_pct=None):
+    def compute_max_drawdown_pct(self):
+        if not self.paper_equity_history:
+            return 0.0
+        peak = float('-inf')
+        max_dd = 0.0
+        for point in self.paper_equity_history:
+            equity = point["equity"]
+            if equity > peak:
+                peak = equity
+            dd = (equity / peak) - 1.0 if peak > 0 else 0.0
+            if dd < max_dd:
+                max_dd = dd
+        return max_dd
+
+    def compute_paper_summary(self):
+        closed_trades = [trade for trade in self.paper_trade_history if trade.get("pnl_pct") is not None]
+        trade_count = len(closed_trades)
+        if trade_count == 0:
+            return {
+                "trade_count": 0,
+                "win_rate": 0.0,
+                "avg_return": 0.0,
+                "max_drawdown": self.compute_max_drawdown_pct(),
+            }
+
+        wins = 0
+        for trade in closed_trades:
+            if trade["pnl_pct"] > 0:
+                wins += 1
+        return {
+            "trade_count": trade_count,
+            "win_rate": wins / trade_count if trade_count > 0 else 0.0,
+            "avg_return": self.paper_realized_pnl_pct / trade_count if trade_count > 0 else 0.0,
+            "max_drawdown": self.compute_max_drawdown_pct(),
+        }
+
+    def current_realized_return_pct(self):
+        if self.paper_initial_equity == 0:
+            return 0.0
+        return (self.paper_realized_equity / self.paper_initial_equity) - 1.0
+
+    def record_paper_trade(self, *, action, snapshot, reason, position=None, stop_price=None, take_profit_price=None, pnl_pct=None, pnl_amount=None):
+        quantity = position.quantity if position is not None else self.current_order_quantity()
+        leverage = position.leverage if position is not None else self.current_order_leverage()
+        notional = self.current_order_notional(price=snapshot.current_price, quantity=quantity)
+        margin = self.current_order_margin(price=snapshot.current_price, quantity=quantity, leverage=leverage)
         trade = {
             "time": pd.Timestamp(snapshot.signal_time),
             "action": action,
             "price": float(snapshot.current_price),
             "reason": reason,
             "stop_price": stop_price,
+            "take_profit_price": take_profit_price,
+            "quantity": quantity,
+            "leverage": leverage,
+            "notional": notional,
+            "margin": margin,
             "forecast_return": float(snapshot.forecast_return),
             "validation_pred_return": float(snapshot.validation_pred_return),
-            "validation_actual_return": float(snapshot.validation_actual_return),
             "pnl_pct": pnl_pct,
+            "pnl_amount": pnl_amount,
             "symbol": getattr(self, "current_symbol", "BTC/USDT"),
             "timeframe": getattr(self, "current_timeframe", "4h"),
         }
@@ -1527,6 +1753,7 @@ class KronosGUI(QMainWindow):
         self.paper_trade_history = self.paper_trade_history[-40:]
         self.append_log(
             f"[PAPER] {self.describe_paper_action(action)} @ {format_price(trade['price'])} | "
+            f"qty {format_quantity(trade['quantity'])} | lev {trade['leverage']}x | "
             f"forecast {format_signed_pct(trade['forecast_return'])} | "
             f"reason: {self.describe_paper_reason(reason)}"
         )
@@ -1540,109 +1767,93 @@ class KronosGUI(QMainWindow):
             self.set_paper_defaults()
             return
 
-        disabled_detail = "Paper trading disabled. Forecast and validation are visible in monitor mode."
+        disabled_detail = "Paper disabled - monitor mode."
         if not self.paper_enabled:
             signal_value = "DISABLED"
             signal_detail = disabled_detail
+        elif self.execution_mode != "paper":
+            signal_value = "MONITOR"
+            signal_detail = "Mode reserved for future routing."
         else:
             signal_value = self.describe_paper_action(decision.action if decision else "no_action")
             signal_detail = self.describe_paper_reason(decision.reason if decision else "entry_conditions_not_met")
         self.paper_signal_card.set_content(signal_value, signal_detail)
 
         if position is None:
-            self.paper_position_card.set_content("FLAT", "No local paper position")
-            self.paper_stop_card.set_content("--", "Stop price inactive while flat")
+            self.paper_position_card.set_content("FLAT", "No position")
             unrealized_pct = 0.0
+            unrealized_amount = 0.0
         else:
+            mark_notional = self.compute_position_notional(position, price=snapshot.current_price)
             self.paper_position_card.set_content(
-                f"{position.side.upper()} @ {format_price(position.entry_price)}",
-                f"Entry {position.entry_time.strftime('%Y-%m-%d %H:%M')}",
-            )
-            stop_distance = abs(position.stop_price / position.entry_price - 1.0)
-            self.paper_stop_card.set_content(
-                format_price(position.stop_price),
-                f"Armed at {format_signed_pct(stop_distance)} from entry",
+                f"{position.side.upper()} {format_quantity(position.quantity)} @ {format_price(position.entry_price)}",
+                f"{position.leverage}x | {format_price(mark_notional)}",
             )
             unrealized_pct = self.compute_position_return_pct(position, snapshot.current_price)
+            unrealized_amount = self.compute_position_pnl_amount(position, snapshot.current_price)
 
-        self.append_paper_equity_point(snapshot, unrealized_pct)
+        self.update_execution_order_preview()
+        self.append_paper_equity_point(snapshot, unrealized_amount)
         self.paper_pnl_card.set_content(
-            format_signed_pct(unrealized_pct),
-            f"Realized {format_signed_pct(self.paper_realized_pnl_pct)} | Equity {format_price(self.current_paper_equity(unrealized_pct))}",
+            format_price(unrealized_amount),
+            f"+{format_signed_pct(self.current_realized_return_pct())} realized | {format_price(self.current_paper_equity(unrealized_amount))} equity",
+        )
+        summary = self.compute_paper_summary()
+        self.paper_trades_card.set_content(
+            str(summary["trade_count"]),
+            f"Win {summary['win_rate']*100:.0f}% | Avg {format_signed_pct(summary['avg_return'])}",
         )
 
-        snapshot_lines = [
-            f"Signal time: {snapshot.signal_time.strftime('%Y-%m-%d %H:%M')}",
-            f"Current close: {format_price(snapshot.current_price)}",
-            f"Forecast close: {format_price(snapshot.forecast_price)} ({format_signed_pct(snapshot.forecast_return)})",
-            f"Validation start: {format_price(snapshot.validation_start_price)}",
-            f"Validation predicted end: {format_price(snapshot.validation_pred_price)} ({format_signed_pct(snapshot.validation_pred_return)})",
-            f"Validation actual end: {format_price(snapshot.validation_actual_price)} ({format_signed_pct(snapshot.validation_actual_return)})",
-            f"Validation history delta: {format_price(snapshot.validation_history_delta)}",
-            f"Validation actual delta: {format_price(snapshot.validation_actual_delta)}",
-        ]
-        if decision and decision.stop_price is not None:
-            snapshot_lines.append(
-                f"Suggested stop: {format_price(decision.stop_price)} ({format_signed_pct(decision.stop_distance_pct)})"
-            )
-        self.paper_snapshot_text.setPlainText("\n".join(snapshot_lines))
-
-        position_values = ["FLAT", "--", "--", format_price(snapshot.current_price), "--", "+0.00%"]
+        position_values = ["FLAT", "--", "--", "--", "--", format_price(snapshot.current_price), "--", "--", "--", "--", "+0.00%"]
         if position is not None:
             position_values = [
                 position.side.upper(),
                 position.entry_time.strftime("%Y-%m-%d %H:%M"),
+                format_quantity(position.quantity),
+                f"{position.leverage}x",
                 format_price(position.entry_price),
                 format_price(snapshot.current_price),
+                format_price(self.compute_position_notional(position, price=snapshot.current_price)),
+                format_price(self.compute_position_margin(position, price=position.entry_price)),
                 format_price(position.stop_price),
-                format_signed_pct(unrealized_pct),
+                format_price(position.take_profit_price),
+                f"{format_price(unrealized_amount)} | {format_signed_pct(unrealized_pct)}",
             ]
         for idx, value in enumerate(position_values):
             self.set_table_item(self.paper_position_table, 0, idx, value)
 
-        trade_lines = []
         self.paper_trade_table.setRowCount(len(self.paper_trade_history))
-        for trade in reversed(self.paper_trade_history):
-            line = (
-                f"{trade['time'].strftime('%Y-%m-%d %H:%M')} | "
-                f"{self.describe_paper_action(trade['action'])} | "
-                f"{format_price(trade['price'])} | "
-                f"forecast {format_signed_pct(trade['forecast_return'])}"
-            )
-            if trade["stop_price"] is not None:
-                line += f" | stop {format_price(trade['stop_price'])}"
-            if trade["pnl_pct"] is not None:
-                line += f" | pnl {format_signed_pct(trade['pnl_pct'])}"
-            line += f" | {self.describe_paper_reason(trade['reason'])}"
-            trade_lines.append(line)
         for row, trade in enumerate(reversed(self.paper_trade_history)):
             values = [
-                trade["time"].strftime("%Y-%m-%d %H:%M"),
+                trade["time"].strftime("%m-%d %H:%M"),
                 self.describe_paper_action(trade["action"]),
+                format_quantity(trade["quantity"]),
+                f"{trade['leverage']}x",
                 format_price(trade["price"]),
+                format_price(trade["notional"]) if trade["notional"] is not None else "--",
                 format_price(trade["stop_price"]) if trade["stop_price"] is not None else "--",
+                format_price(trade.get("take_profit_price")) if trade.get("take_profit_price") is not None else "--",
+                format_price(trade["pnl_amount"]) if trade["pnl_amount"] is not None else "--",
                 format_signed_pct(trade["forecast_return"]),
-                format_signed_pct(trade["validation_pred_return"]),
-                format_signed_pct(trade["validation_actual_return"]),
-                format_signed_pct(trade["pnl_pct"]) if trade["pnl_pct"] is not None else "--",
+                self.describe_paper_reason(trade["reason"]),
             ]
             for col, value in enumerate(values):
                 self.set_table_item(self.paper_trade_table, row, col, value)
-        self.paper_trade_log.setPlainText("\n".join(trade_lines))
-        self.paper_equity_canvas.plot_equity(self.paper_equity_history)
-        self.paper_trade_chart_canvas.plot_market_trades(
-            df=self.paper_latest_market_df,
-            trades=self.paper_trade_history,
-            symbol=getattr(self, "current_symbol", "BTC/USDT"),
-            timeframe=getattr(self, "current_timeframe", "4h"),
-        )
+
+        if hasattr(self, "paper_equity_card"):
+            self.paper_equity_card.set_content(
+                format_price(self.current_paper_equity()),
+                format_signed_pct(self.current_realized_return_pct())
+            )
 
         if not self.paper_enabled:
-            position_text = "Paper trading disabled."
+            position_text = "Disabled."
+        elif self.execution_mode != "paper":
+            position_text = "Reserved."
         else:
-            position_text = "Paper position active." if position is not None else "Paper mode is flat."
+            position_text = "Active." if position is not None else "Flat."
         self.paper_status_label.setText(
-            f"{position_text} Latest decision: {signal_value}. {signal_detail}"
+            f"{position_text} Decision: {signal_value}. {signal_detail}"
         )
 
     def update_paper_mode(self, payload):
@@ -1657,7 +1868,8 @@ class KronosGUI(QMainWindow):
             return
 
         self.paper_last_snapshot = snapshot
-        if not self.paper_enabled:
+        self.update_execution_order_preview()
+        if not self.paper_trading_active():
             self.paper_last_decision = None
             self.render_paper_mode()
             return
@@ -1667,30 +1879,48 @@ class KronosGUI(QMainWindow):
             self.paper_last_decision = decision
             if decision.action in ("enter_long", "enter_short"):
                 side = "long" if decision.action == "enter_long" else "short"
+                if self.paper_use_risk_fraction and decision.stop_distance_pct:
+                    qty = self.current_order_quantity_by_risk(
+                        snapshot.current_price, decision.stop_distance_pct
+                    )
+                    lev = self.current_order_leverage()
+                else:
+                    qty = self.current_order_quantity()
+                    lev = self.current_order_leverage()
                 self.paper_position = PaperPosition(
                     side=side,
                     entry_price=snapshot.current_price,
                     stop_price=decision.stop_price,
+                    take_profit_price=decision.take_profit_price,
                     entry_time=snapshot.signal_time,
+                    quantity=qty,
+                    leverage=lev,
                 )
                 self.record_paper_trade(
                     action=decision.action,
                     snapshot=snapshot,
                     reason=decision.reason,
+                    position=self.paper_position,
                     stop_price=decision.stop_price,
+                    take_profit_price=decision.take_profit_price,
                 )
         else:
             decision = build_exit_decision(self.paper_position, snapshot, self.paper_strategy_config)
             self.paper_last_decision = decision
             if decision.action in ("exit_long", "exit_short"):
                 pnl_pct = self.compute_position_return_pct(self.paper_position, snapshot.current_price)
+                pnl_amount = self.compute_position_pnl_amount(self.paper_position, snapshot.current_price)
+                self.paper_realized_equity += pnl_amount
                 self.paper_realized_pnl_pct += pnl_pct
                 self.record_paper_trade(
                     action=decision.action,
                     snapshot=snapshot,
                     reason=decision.reason,
+                    position=self.paper_position,
                     stop_price=self.paper_position.stop_price,
+                    take_profit_price=self.paper_position.take_profit_price,
                     pnl_pct=pnl_pct,
+                    pnl_amount=pnl_amount,
                 )
                 self.paper_position = None
 
@@ -2233,19 +2463,20 @@ class KronosGUI(QMainWindow):
         self.move_card.set_content(payload["forecast_move"], "Predicted move from latest close")
         self.mape_card.set_content(payload["mape_text"], payload["subtitle"])
         self.subtitle_label.setText(payload["subtitle"])
+        self.update_paper_mode(payload)
         self.forecast_canvas.plot_forecast(
             symbol=self.current_symbol,
             timeframe=self.current_timeframe,
             context_df=payload["context_df"],
             future_pred_df=payload["future_pred_df"],
             forecast_interval_df=payload["forecast_interval_df"],
+            paper_trades=self.paper_trade_history,
         )
         self.validation_canvas.plot_validation(
             validation_history_df=payload["validation_history_df"],
             validation_pred_df=payload["validation_pred_df"],
             validation_actual_df=payload["validation_actual_df"],
         )
-        self.update_paper_mode(payload)
         self.status_bar.showMessage("Forecast complete")
         self.update_badges(feed_status="READY")
         if auto_run and self.auto_forecast_running:
