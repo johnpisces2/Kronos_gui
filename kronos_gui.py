@@ -8,8 +8,9 @@ import threading
 import ccxt
 import numpy as np
 import pandas as pd
+from typing import Optional
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -110,13 +111,14 @@ except ImportError as exc:
     TORCH_AVAILABLE = False
     TORCH_IMPORT_ERROR = exc
 
-from qtgui.paper_strategy import (
+from paper_strategy import (
     PaperPosition,
     PaperStrategyConfig,
     build_entry_decision,
     build_exit_decision,
     build_signal_snapshot,
 )
+from execution import ExecutionEngine
 
 LOCAL_MLX_MODEL_PATH = os.path.join(PROJECT_ROOT, "model", "kronos-mlx-base")
 LOCAL_MLX_TOKENIZER_PATH = os.path.join(PROJECT_ROOT, "model", "kronos-mlx-tokenizer-base")
@@ -837,24 +839,40 @@ class KronosGUI(QMainWindow):
         self.busy = False
         self.active_run_id = 0
         self.active_run_mode = None
-        self.paper_strategy_config = PaperStrategyConfig()
-        self.paper_position = None
-        self.paper_trade_history = []
-        self.paper_equity_history = []
-        self.paper_last_snapshot = None
-        self.paper_last_decision = None
-        self.paper_realized_pnl_pct = 0.0
-        self.paper_initial_equity = 1000.0
-        self.paper_realized_equity = self.paper_initial_equity
-        self.paper_enabled = True
-        self.paper_latest_market_df = None
+        self.execution = ExecutionEngine()
         self.execution_mode = "paper"
-        self.paper_order_quantity = 0.01
-        self.paper_order_leverage = 5
-        self.paper_use_risk_fraction = True
-        self.paper_risk_fraction = 0.08
+        self.latest_market_df = None
+
         self.init_ui()
         self.show()
+
+    @property
+    def paper_position(self):
+        return self.execution.position
+
+    @property
+    def paper_initial_equity(self):
+        return self.execution.initial_equity
+
+    @paper_initial_equity.setter
+    def paper_initial_equity(self, value):
+        self.execution.initial_equity = value
+
+    @property
+    def paper_realized_equity(self):
+        return self.execution.realized_equity
+
+    @paper_realized_equity.setter
+    def paper_realized_equity(self, value):
+        self.execution.realized_equity = value
+
+    @property
+    def paper_trade_history(self):
+        return self.execution.trade_history
+
+    @property
+    def paper_equity_history(self):
+        return self.execution.equity_history
 
     def available_model_configs(self):
         configs = {}
@@ -1288,7 +1306,7 @@ class KronosGUI(QMainWindow):
         top_layout.addWidget(self.execution_mode_combo)
 
         self.paper_enable_checkbox = QCheckBox("Enable")
-        self.paper_enable_checkbox.setChecked(self.paper_enabled)
+        self.paper_enable_checkbox.setChecked(self.execution.enabled)
         self.paper_enable_checkbox.toggled.connect(self.on_paper_trading_toggled)
         top_layout.addWidget(self.paper_enable_checkbox)
 
@@ -1297,7 +1315,7 @@ class KronosGUI(QMainWindow):
         self.paper_initial_equity_spin.setRange(1000.0, 100000000.0)
         self.paper_initial_equity_spin.setDecimals(0)
         self.paper_initial_equity_spin.setSingleStep(1000.0)
-        self.paper_initial_equity_spin.setValue(self.paper_initial_equity)
+        self.paper_initial_equity_spin.setValue(self.execution.initial_equity)
         self.paper_initial_equity_spin.valueChanged.connect(self.on_paper_initial_equity_changed)
         self.paper_initial_equity_spin.setMaximumWidth(110)
         top_layout.addWidget(self.paper_initial_equity_spin)
@@ -1313,7 +1331,7 @@ class KronosGUI(QMainWindow):
         self.paper_order_qty_spin.setDecimals(4)
         self.paper_order_qty_spin.setRange(0.0001, 1000000.0)
         self.paper_order_qty_spin.setSingleStep(0.001)
-        self.paper_order_qty_spin.setValue(self.paper_order_quantity)
+        self.paper_order_qty_spin.setValue(self.execution.order_quantity)
         self.paper_order_qty_spin.valueChanged.connect(self.on_paper_order_value_changed)
         self.paper_order_qty_spin.setMaximumWidth(90)
         top_layout.addWidget(self.paper_order_qty_spin)
@@ -1321,21 +1339,21 @@ class KronosGUI(QMainWindow):
         top_layout.addWidget(QLabel("Lev"))
         self.paper_leverage_spin = QSpinBox()
         self.paper_leverage_spin.setRange(1, 125)
-        self.paper_leverage_spin.setValue(self.paper_order_leverage)
+        self.paper_leverage_spin.setValue(self.execution.order_leverage)
         self.paper_leverage_spin.valueChanged.connect(self.on_paper_order_value_changed)
         self.paper_leverage_spin.setMaximumWidth(55)
         top_layout.addWidget(self.paper_leverage_spin)
 
         self.paper_risk_checkbox = QCheckBox("Risk%")
         self.paper_risk_checkbox.toggled.connect(self.on_paper_risk_toggled)
-        self.paper_risk_checkbox.setChecked(self.paper_use_risk_fraction)
+        self.paper_risk_checkbox.setChecked(self.execution.use_risk_fraction)
         top_layout.addWidget(self.paper_risk_checkbox)
 
         self.paper_risk_spin = QDoubleSpinBox()
         self.paper_risk_spin.setDecimals(2)
         self.paper_risk_spin.setRange(0.1, 50.0)
         self.paper_risk_spin.setSuffix("%")
-        self.paper_risk_spin.setValue(self.paper_risk_fraction * 100)
+        self.paper_risk_spin.setValue(self.execution.risk_fraction * 100)
         self.paper_risk_spin.valueChanged.connect(self.on_paper_risk_changed)
         self.paper_risk_spin.setMaximumWidth(70)
         top_layout.addWidget(self.paper_risk_spin)
@@ -1433,108 +1451,207 @@ class KronosGUI(QMainWindow):
         if hasattr(self, "paper_trade_table"):
             self.paper_trade_table.setRowCount(0)
         if hasattr(self, "paper_equity_card"):
-            self.paper_equity_card.set_content(format_price(self.paper_initial_equity), "+0.00%")
+            self.paper_equity_card.set_content(format_price(self.execution.initial_equity), "+0.00%")
         self.update_execution_order_preview()
 
     def on_paper_trading_toggled(self, checked):
-        self.paper_enabled = bool(checked)
+        self.execution.enabled = bool(checked)
         if self.paper_trading_active():
             self.paper_status_label.setText("Paper trading enabled. The next completed forecast candle can open or close local positions.")
-        elif self.paper_enabled:
+        elif self.execution.enabled:
             self.paper_status_label.setText("Paper trading is armed, but only Local Paper mode can execute right now.")
         else:
-            self.paper_last_decision = None
+            self.execution.last_decision = None
             self.paper_status_label.setText("Paper trading disabled. Signals are visible, but no local entries or exits will be simulated.")
         self.render_paper_mode()
 
     def on_execution_mode_changed(self, index):
         self.execution_mode = self.execution_mode_combo.itemData(index) or "paper"
+        self.execution.mode = self.execution_mode
         self.update_execution_order_preview()
         self.render_paper_mode()
 
     def on_paper_order_value_changed(self, value):
         del value
-        self.paper_order_quantity = float(self.paper_order_qty_spin.value())
-        self.paper_order_leverage = int(self.paper_leverage_spin.value())
+        self.execution.order_quantity = float(self.paper_order_qty_spin.value())
+        self.execution.order_leverage = int(self.paper_leverage_spin.value())
         self.update_execution_order_preview()
 
     def on_paper_risk_toggled(self, checked):
-        self.paper_use_risk_fraction = checked
+        self.execution.use_risk_fraction = checked
         self.paper_order_qty_spin.setVisible(not checked)
         self.paper_leverage_spin.setVisible(not checked)
         self.update_execution_order_preview()
 
     def on_paper_risk_changed(self, value):
-        self.paper_risk_fraction = float(value) / 100.0
+        self.execution.risk_fraction = float(value) / 100.0
         self.update_execution_order_preview()
-        if self.paper_last_snapshot is not None:
+        if self.execution.last_snapshot is not None:
             self.render_paper_mode()
 
     def on_paper_initial_equity_changed(self, value):
         value = float(value)
         if value <= 0:
             return
-        if abs(value - self.paper_initial_equity) < 1e-9:
+        if abs(value - self.execution.initial_equity) < 1e-9:
             return
-        self.paper_initial_equity = value
+        self.execution.initial_equity = value
         self.reset_paper_account(reason=f"Paper account reset with initial equity {format_price(value)}.")
 
     def reset_paper_account(self, checked=False, *, reason=None):
-        self.paper_position = None
-        self.paper_trade_history = []
-        self.paper_equity_history = []
-        self.paper_realized_pnl_pct = 0.0
-        self.paper_realized_equity = self.paper_initial_equity
-        self.paper_last_decision = None
-        self.paper_last_snapshot = None
-        self.paper_latest_market_df = None
+        self.execution.reset()
+        self.latest_market_df = None
         self.set_paper_defaults()
         if hasattr(self, "paper_status_label"):
             self.paper_status_label.setText(
-                reason or f"Paper account reset. Starting equity {format_price(self.paper_initial_equity)}."
+                reason or f"Paper account reset. Starting equity {format_price(self.execution.initial_equity)}."
             )
         self.update_execution_order_preview()
 
     def paper_trading_active(self):
-        return self.paper_enabled and self.execution_mode == "paper"
+        return self.execution.trading_active()
 
     def current_execution_price(self):
-        if self.paper_last_snapshot is not None:
-            return float(self.paper_last_snapshot.current_price)
-        if self.paper_position is not None:
-            return float(self.paper_position.entry_price)
-        if self.paper_latest_market_df is not None and not self.paper_latest_market_df.empty:
-            return float(self.paper_latest_market_df["close"].iloc[-1])
+        if self.execution.last_snapshot is not None:
+            return float(self.execution.last_snapshot.current_price)
+        if self.execution.position is not None:
+            return float(self.execution.position.entry_price)
+        if self.latest_market_df is not None and not self.latest_market_df.empty:
+            return float(self.latest_market_df["close"].iloc[-1])
         return None
-
-    def current_order_quantity(self):
-        return max(0.0001, float(getattr(self, "paper_order_qty_spin", None).value() if hasattr(self, "paper_order_qty_spin") else self.paper_order_quantity))
-
-    def current_order_leverage(self):
-        return max(1, int(getattr(self, "paper_leverage_spin", None).value() if hasattr(self, "paper_leverage_spin") else self.paper_order_leverage))
-
-    def current_order_quantity_by_risk(self, entry_price, stop_distance_pct):
-        equity = self.current_paper_equity()
-        risk_amount = equity * self.paper_risk_fraction
-        stop_distance_price = entry_price * stop_distance_pct
-        if stop_distance_price <= 0:
-            return self.current_order_quantity()
-        qty = risk_amount / stop_distance_price
-        return max(0.0001, qty)
 
     def current_order_notional(self, price=None, quantity=None):
         mark_price = self.current_execution_price() if price is None else float(price)
         if mark_price is None:
             return None
-        qty = self.current_order_quantity() if quantity is None else float(quantity)
+        qty = self.execution.current_order_quantity() if quantity is None else float(quantity)
         return mark_price * qty
 
     def current_order_margin(self, price=None, quantity=None, leverage=None):
         notional = self.current_order_notional(price=price, quantity=quantity)
         if notional is None:
             return None
-        lev = self.current_order_leverage() if leverage is None else int(leverage)
+        lev = self.execution.current_order_leverage() if leverage is None else int(leverage)
         return notional / max(1, lev)
+
+    def describe_paper_action(self, action):
+        return self.execution.describe_action(action)
+
+    def describe_paper_reason(self, reason):
+        return self.execution.describe_reason(reason)
+
+    def current_paper_equity(self, unrealized_amount=0.0):
+        return self.execution.current_equity(unrealized_amount)
+
+    def current_realized_return_pct(self):
+        return self.execution.current_realized_return_pct()
+
+    def set_table_item(self, table, row, column, value):
+        existing = table.item(row, column)
+        if existing is not None and existing.text() == value:
+            return
+        table.setItem(row, column, QTableWidgetItem(value))
+
+    def compute_paper_summary(self):
+        return self.execution.compute_summary()
+
+    def render_paper_mode(self):
+        snapshot = self.execution.last_snapshot
+        decision = self.execution.last_decision
+        position = self.execution.position
+
+        if snapshot is None:
+            self.set_paper_defaults()
+            return
+
+        disabled_detail = "Paper disabled - monitor mode."
+        if not self.execution.enabled:
+            signal_value = "DISABLED"
+            signal_detail = disabled_detail
+        elif self.execution_mode != "paper":
+            signal_value = "MONITOR"
+            signal_detail = "Mode reserved for future routing."
+        else:
+            signal_value = self.describe_paper_action(decision.action if decision else "no_action")
+            signal_detail = self.describe_paper_reason(decision.reason if decision else "entry_conditions_not_met")
+        self.paper_signal_card.set_content(signal_value, signal_detail)
+
+        if position is None:
+            self.paper_position_card.set_content("FLAT", "No position")
+            unrealized_pct = 0.0
+            unrealized_amount = 0.0
+        else:
+            mark_notional = self.execution.compute_position_notional(position, price=snapshot.current_price)
+            self.paper_position_card.set_content(
+                f"{position.side.upper()} {format_quantity(position.quantity)} @ {format_price(position.entry_price)}",
+                f"{position.leverage}x | {format_price(mark_notional)}",
+            )
+            unrealized_pct = self.execution.compute_position_return_pct(position, snapshot.current_price)
+            unrealized_amount = self.execution.compute_position_pnl_amount(position, snapshot.current_price)
+
+        self.update_execution_order_preview()
+        self.execution.append_equity_point(snapshot, unrealized_amount)
+        self.paper_pnl_card.set_content(
+            format_price(unrealized_amount),
+            f"+{format_signed_pct(self.current_realized_return_pct())} realized | {format_price(self.current_paper_equity(unrealized_amount))} equity",
+        )
+        summary = self.compute_paper_summary()
+        self.paper_trades_card.set_content(
+            str(summary["trade_count"]),
+            f"Win {summary['win_rate']*100:.0f}% | Avg {format_signed_pct(summary['avg_return'])}",
+        )
+
+        position_values = ["FLAT", "--", "--", "--", "--", format_price(snapshot.current_price), "--", "--", "--", "--", "+0.00%"]
+        if position is not None:
+            position_values = [
+                position.side.upper(),
+                position.entry_time.strftime("%Y-%m-%d %H:%M"),
+                format_quantity(position.quantity),
+                f"{position.leverage}x",
+                format_price(position.entry_price),
+                format_price(snapshot.current_price),
+                format_price(self.execution.compute_position_notional(position, price=snapshot.current_price)),
+                format_price(self.execution.compute_position_margin(position, price=position.entry_price)),
+                format_price(position.stop_price),
+                format_price(position.take_profit_price),
+                f"{format_price(unrealized_amount)} | {format_signed_pct(unrealized_pct)}",
+            ]
+        for idx, value in enumerate(position_values):
+            self.set_table_item(self.paper_position_table, 0, idx, value)
+
+        self.paper_trade_table.setRowCount(len(self.execution.trade_history))
+        for row, trade in enumerate(reversed(self.execution.trade_history)):
+            values = [
+                trade["time"].strftime("%m-%d %H:%M"),
+                self.describe_paper_action(trade["action"]),
+                format_quantity(trade["quantity"]),
+                f"{trade['leverage']}x",
+                format_price(trade["price"]),
+                format_price(trade["notional"]) if trade["notional"] is not None else "--",
+                format_price(trade["stop_price"]) if trade["stop_price"] is not None else "--",
+                format_price(trade.get("take_profit_price")) if trade.get("take_profit_price") is not None else "--",
+                format_price(trade["pnl_amount"]) if trade["pnl_amount"] is not None else "--",
+                format_signed_pct(trade["forecast_return"]),
+                self.describe_paper_reason(trade["reason"]),
+            ]
+            for col, value in enumerate(values):
+                self.set_table_item(self.paper_trade_table, row, col, value)
+
+        if hasattr(self, "paper_equity_card"):
+            self.paper_equity_card.set_content(
+                format_price(self.current_paper_equity()),
+                format_signed_pct(self.current_realized_return_pct())
+            )
+
+        if not self.execution.enabled:
+            position_text = "Disabled."
+        elif self.execution_mode != "paper":
+            position_text = "Reserved."
+        else:
+            position_text = "Active." if position is not None else "Flat."
+        self.paper_status_label.setText(
+            f"{position_text} Decision: {signal_value}. {signal_detail}"
+        )
 
     def update_execution_order_preview(self):
         price = self.current_execution_price()
@@ -1644,286 +1761,14 @@ class KronosGUI(QMainWindow):
     def describe_paper_action(self, action):
         return self._PAPER_ACTION_LABELS.get(action, action.upper())
 
-    def describe_paper_reason(self, reason):
-        return self._PAPER_REASON_LABELS.get(reason, reason.replace("_", " ").capitalize())
-
-    def compute_position_return_pct(self, position, current_price):
-        if position.side == "long":
-            return (current_price / position.entry_price) - 1.0
-        return (position.entry_price / current_price) - 1.0
-
-    def compute_position_pnl_amount(self, position, current_price):
-        if position.side == "long":
-            return (current_price - position.entry_price) * position.quantity
-        return (position.entry_price - current_price) * position.quantity
-
-    def compute_position_notional(self, position, price=None):
-        mark_price = float(position.entry_price if price is None else price)
-        return mark_price * position.quantity
-
-    def compute_position_margin(self, position, price=None):
-        notional = self.compute_position_notional(position, price=price)
-        return notional / max(1, position.leverage)
-
-    def current_paper_equity(self, unrealized_amount=0.0):
-        return self.paper_realized_equity + unrealized_amount
-
-    def append_paper_equity_point(self, snapshot, unrealized_amount):
-        point = {
-            "time": pd.Timestamp(snapshot.signal_time),
-            "equity": self.current_paper_equity(unrealized_amount),
-        }
-        if self.paper_equity_history and self.paper_equity_history[-1]["time"] == point["time"]:
-            self.paper_equity_history[-1] = point
-            return
-        self.paper_equity_history.append(point)
-        self.paper_equity_history = self.paper_equity_history[-240:]
-
-    def set_table_item(self, table, row, column, value):
-        existing = table.item(row, column)
-        if existing is not None and existing.text() == value:
-            return
-        table.setItem(row, column, QTableWidgetItem(value))
-
-    def compute_max_drawdown_pct(self):
-        if not self.paper_equity_history:
-            return 0.0
-        peak = float('-inf')
-        max_dd = 0.0
-        for point in self.paper_equity_history:
-            equity = point["equity"]
-            if equity > peak:
-                peak = equity
-            dd = (equity / peak) - 1.0 if peak > 0 else 0.0
-            if dd < max_dd:
-                max_dd = dd
-        return max_dd
-
-    def compute_paper_summary(self):
-        closed_trades = [trade for trade in self.paper_trade_history if trade.get("pnl_pct") is not None]
-        trade_count = len(closed_trades)
-        if trade_count == 0:
-            return {
-                "trade_count": 0,
-                "win_rate": 0.0,
-                "avg_return": 0.0,
-                "max_drawdown": self.compute_max_drawdown_pct(),
-            }
-
-        wins = 0
-        for trade in closed_trades:
-            if trade["pnl_pct"] > 0:
-                wins += 1
-        return {
-            "trade_count": trade_count,
-            "win_rate": wins / trade_count if trade_count > 0 else 0.0,
-            "avg_return": self.paper_realized_pnl_pct / trade_count if trade_count > 0 else 0.0,
-            "max_drawdown": self.compute_max_drawdown_pct(),
-        }
-
-    def current_realized_return_pct(self):
-        if self.paper_initial_equity == 0:
-            return 0.0
-        return (self.paper_realized_equity / self.paper_initial_equity) - 1.0
-
-    def record_paper_trade(self, *, action, snapshot, reason, position=None, stop_price=None, take_profit_price=None, pnl_pct=None, pnl_amount=None):
-        quantity = position.quantity if position is not None else self.current_order_quantity()
-        leverage = position.leverage if position is not None else self.current_order_leverage()
-        notional = self.current_order_notional(price=snapshot.current_price, quantity=quantity)
-        margin = self.current_order_margin(price=snapshot.current_price, quantity=quantity, leverage=leverage)
-        trade = {
-            "time": pd.Timestamp(snapshot.signal_time),
-            "action": action,
-            "price": float(snapshot.current_price),
-            "reason": reason,
-            "stop_price": stop_price,
-            "take_profit_price": take_profit_price,
-            "quantity": quantity,
-            "leverage": leverage,
-            "notional": notional,
-            "margin": margin,
-            "forecast_return": float(snapshot.forecast_return),
-            "validation_pred_return": float(snapshot.validation_pred_return),
-            "pnl_pct": pnl_pct,
-            "pnl_amount": pnl_amount,
-            "symbol": getattr(self, "current_symbol", "BTC/USDT"),
-            "timeframe": getattr(self, "current_timeframe", "4h"),
-        }
-        self.paper_trade_history.append(trade)
-        self.paper_trade_history = self.paper_trade_history[-40:]
-        self.append_log(
-            f"[PAPER] {self.describe_paper_action(action)} @ {format_price(trade['price'])} | "
-            f"qty {format_quantity(trade['quantity'])} | lev {trade['leverage']}x | "
-            f"forecast {format_signed_pct(trade['forecast_return'])} | "
-            f"reason: {self.describe_paper_reason(reason)}"
-        )
-
-    def render_paper_mode(self):
-        snapshot = self.paper_last_snapshot
-        decision = self.paper_last_decision
-        position = self.paper_position
-
-        if snapshot is None:
-            self.set_paper_defaults()
-            return
-
-        disabled_detail = "Paper disabled - monitor mode."
-        if not self.paper_enabled:
-            signal_value = "DISABLED"
-            signal_detail = disabled_detail
-        elif self.execution_mode != "paper":
-            signal_value = "MONITOR"
-            signal_detail = "Mode reserved for future routing."
-        else:
-            signal_value = self.describe_paper_action(decision.action if decision else "no_action")
-            signal_detail = self.describe_paper_reason(decision.reason if decision else "entry_conditions_not_met")
-        self.paper_signal_card.set_content(signal_value, signal_detail)
-
-        if position is None:
-            self.paper_position_card.set_content("FLAT", "No position")
-            unrealized_pct = 0.0
-            unrealized_amount = 0.0
-        else:
-            mark_notional = self.compute_position_notional(position, price=snapshot.current_price)
-            self.paper_position_card.set_content(
-                f"{position.side.upper()} {format_quantity(position.quantity)} @ {format_price(position.entry_price)}",
-                f"{position.leverage}x | {format_price(mark_notional)}",
-            )
-            unrealized_pct = self.compute_position_return_pct(position, snapshot.current_price)
-            unrealized_amount = self.compute_position_pnl_amount(position, snapshot.current_price)
-
-        self.update_execution_order_preview()
-        self.append_paper_equity_point(snapshot, unrealized_amount)
-        self.paper_pnl_card.set_content(
-            format_price(unrealized_amount),
-            f"+{format_signed_pct(self.current_realized_return_pct())} realized | {format_price(self.current_paper_equity(unrealized_amount))} equity",
-        )
-        summary = self.compute_paper_summary()
-        self.paper_trades_card.set_content(
-            str(summary["trade_count"]),
-            f"Win {summary['win_rate']*100:.0f}% | Avg {format_signed_pct(summary['avg_return'])}",
-        )
-
-        position_values = ["FLAT", "--", "--", "--", "--", format_price(snapshot.current_price), "--", "--", "--", "--", "+0.00%"]
-        if position is not None:
-            position_values = [
-                position.side.upper(),
-                position.entry_time.strftime("%Y-%m-%d %H:%M"),
-                format_quantity(position.quantity),
-                f"{position.leverage}x",
-                format_price(position.entry_price),
-                format_price(snapshot.current_price),
-                format_price(self.compute_position_notional(position, price=snapshot.current_price)),
-                format_price(self.compute_position_margin(position, price=position.entry_price)),
-                format_price(position.stop_price),
-                format_price(position.take_profit_price),
-                f"{format_price(unrealized_amount)} | {format_signed_pct(unrealized_pct)}",
-            ]
-        for idx, value in enumerate(position_values):
-            self.set_table_item(self.paper_position_table, 0, idx, value)
-
-        self.paper_trade_table.setRowCount(len(self.paper_trade_history))
-        for row, trade in enumerate(reversed(self.paper_trade_history)):
-            values = [
-                trade["time"].strftime("%m-%d %H:%M"),
-                self.describe_paper_action(trade["action"]),
-                format_quantity(trade["quantity"]),
-                f"{trade['leverage']}x",
-                format_price(trade["price"]),
-                format_price(trade["notional"]) if trade["notional"] is not None else "--",
-                format_price(trade["stop_price"]) if trade["stop_price"] is not None else "--",
-                format_price(trade.get("take_profit_price")) if trade.get("take_profit_price") is not None else "--",
-                format_price(trade["pnl_amount"]) if trade["pnl_amount"] is not None else "--",
-                format_signed_pct(trade["forecast_return"]),
-                self.describe_paper_reason(trade["reason"]),
-            ]
-            for col, value in enumerate(values):
-                self.set_table_item(self.paper_trade_table, row, col, value)
-
-        if hasattr(self, "paper_equity_card"):
-            self.paper_equity_card.set_content(
-                format_price(self.current_paper_equity()),
-                format_signed_pct(self.current_realized_return_pct())
-            )
-
-        if not self.paper_enabled:
-            position_text = "Disabled."
-        elif self.execution_mode != "paper":
-            position_text = "Reserved."
-        else:
-            position_text = "Active." if position is not None else "Flat."
-        self.paper_status_label.setText(
-            f"{position_text} Decision: {signal_value}. {signal_detail}"
-        )
-
     def update_paper_mode(self, payload):
-        self.paper_latest_market_df = payload.get("df")
-        try:
-            snapshot = build_signal_snapshot(payload)
-        except ValueError:
-            self.paper_last_snapshot = None
-            self.paper_last_decision = None
+        self.latest_market_df = payload.get("df")
+        snapshot, decision = self.execution.update(payload)
+        if self.execution.last_snapshot is None:
             self.set_paper_defaults()
             self.paper_status_label.setText(self.describe_paper_reason("missing_validation_data"))
             return
-
-        self.paper_last_snapshot = snapshot
         self.update_execution_order_preview()
-        if not self.paper_trading_active():
-            self.paper_last_decision = None
-            self.render_paper_mode()
-            return
-
-        if self.paper_position is None:
-            decision = build_entry_decision(snapshot, self.paper_strategy_config)
-            self.paper_last_decision = decision
-            if decision.action in ("enter_long", "enter_short"):
-                side = "long" if decision.action == "enter_long" else "short"
-                if self.paper_use_risk_fraction and decision.stop_distance_pct:
-                    qty = self.current_order_quantity_by_risk(
-                        snapshot.current_price, decision.stop_distance_pct
-                    )
-                    lev = self.current_order_leverage()
-                else:
-                    qty = self.current_order_quantity()
-                    lev = self.current_order_leverage()
-                self.paper_position = PaperPosition(
-                    side=side,
-                    entry_price=snapshot.current_price,
-                    stop_price=decision.stop_price,
-                    take_profit_price=decision.take_profit_price,
-                    entry_time=snapshot.signal_time,
-                    quantity=qty,
-                    leverage=lev,
-                )
-                self.record_paper_trade(
-                    action=decision.action,
-                    snapshot=snapshot,
-                    reason=decision.reason,
-                    position=self.paper_position,
-                    stop_price=decision.stop_price,
-                    take_profit_price=decision.take_profit_price,
-                )
-        else:
-            decision = build_exit_decision(self.paper_position, snapshot, self.paper_strategy_config)
-            self.paper_last_decision = decision
-            if decision.action in ("exit_long", "exit_short"):
-                pnl_pct = self.compute_position_return_pct(self.paper_position, snapshot.current_price)
-                pnl_amount = self.compute_position_pnl_amount(self.paper_position, snapshot.current_price)
-                self.paper_realized_equity += pnl_amount
-                self.paper_realized_pnl_pct += pnl_pct
-                self.record_paper_trade(
-                    action=decision.action,
-                    snapshot=snapshot,
-                    reason=decision.reason,
-                    position=self.paper_position,
-                    stop_price=self.paper_position.stop_price,
-                    take_profit_price=self.paper_position.take_profit_price,
-                    pnl_pct=pnl_pct,
-                    pnl_amount=pnl_amount,
-                )
-                self.paper_position = None
-
         self.render_paper_mode()
 
     def show_error(self, title, message):
@@ -2470,7 +2315,7 @@ class KronosGUI(QMainWindow):
             context_df=payload["context_df"],
             future_pred_df=payload["future_pred_df"],
             forecast_interval_df=payload["forecast_interval_df"],
-            paper_trades=self.paper_trade_history,
+            paper_trades=self.execution.trade_history,
         )
         self.validation_canvas.plot_validation(
             validation_history_df=payload["validation_history_df"],

@@ -148,7 +148,7 @@ def build_paper_exit_payload():
 
 
 def build_gui_stub():
-    from qtgui.kronos_gui import KronosGUI
+    from kronos_gui import KronosGUI
 
     gui = KronosGUI.__new__(KronosGUI)
     gui.selected_model_key = "kronos-small-local"
@@ -167,7 +167,11 @@ def build_gui_stub():
     gui.set_busy = MagicMock()
     gui._save_forecast_results = MagicMock()
     gui._schedule_next_auto_forecast = MagicMock()
-    gui.paper_trade_history = []
+    from execution import ExecutionEngine
+    gui.execution = ExecutionEngine()
+    gui.execution.trade_history = []
+    gui.paper_initial_equity = 1000.0
+    gui.paper_realized_equity = 1000.0
     gui.append_log = MagicMock()
     gui.show_error = MagicMock()
     gui.update_paper_mode = MagicMock()
@@ -176,7 +180,7 @@ def build_gui_stub():
 
 class TestTimeAndDataHelpers(unittest.TestCase):
     def test_utc_timestamp_series_converts_to_taipei_clock(self):
-        from qtgui.kronos_gui import to_display_timestamp_series
+        from kronos_gui import to_display_timestamp_series
 
         ts = pd.Series(pd.to_datetime(["2026-04-14 00:00:00"], utc=True))
         result = to_display_timestamp_series(ts)
@@ -185,14 +189,14 @@ class TestTimeAndDataHelpers(unittest.TestCase):
         self.assertIsNone(result.dt.tz)
 
     def test_format_display_timestamp_uses_taipei_clock(self):
-        from qtgui.kronos_gui import format_display_timestamp
+        from kronos_gui import format_display_timestamp
 
         result = format_display_timestamp(pd.Timestamp("2026-04-14 00:05:06", tz="UTC"))
 
         self.assertEqual(result, "20260414_080506")
 
     def test_build_future_timestamps_steps_forward(self):
-        from qtgui.kronos_gui import build_future_timestamps
+        from kronos_gui import build_future_timestamps
 
         future = build_future_timestamps(
             pd.Timestamp("2026-04-14 04:00:00"),
@@ -205,7 +209,7 @@ class TestTimeAndDataHelpers(unittest.TestCase):
         )))
 
     def test_build_validation_segments_drops_latest_bar(self):
-        from qtgui.kronos_gui import build_validation_segments
+        from kronos_gui import build_validation_segments
 
         df = build_sample_df(periods=24)
         history_df, actual_df = build_validation_segments(df, lookback=10, pred_len=4)
@@ -214,7 +218,7 @@ class TestTimeAndDataHelpers(unittest.TestCase):
         self.assertEqual(actual_df["timestamps"].iloc[-1], df["timestamps"].iloc[-2])
 
     def test_build_validation_segments_advances_with_new_candle(self):
-        from qtgui.kronos_gui import build_validation_segments
+        from kronos_gui import build_validation_segments
 
         df = build_sample_df(periods=24)
         next_row = df.iloc[[-1]].copy()
@@ -236,7 +240,7 @@ class TestTimeAndDataHelpers(unittest.TestCase):
 
 class TestGuiControllerMethods(unittest.TestCase):
     def test_get_interval_seconds_mapping(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         gui = KronosGUI.__new__(KronosGUI)
 
@@ -247,7 +251,7 @@ class TestGuiControllerMethods(unittest.TestCase):
         self.assertEqual(gui._get_interval_seconds("1d"), 86400)
 
     def test_get_next_candle_time_4h_at_2pm(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         gui = KronosGUI.__new__(KronosGUI)
         next_time = gui._get_next_candle_time(pd.Timestamp("2026-04-14 14:30:00"), "4h")
@@ -255,7 +259,7 @@ class TestGuiControllerMethods(unittest.TestCase):
         self.assertEqual(next_time, pd.Timestamp("2026-04-14 16:00:00"))
 
     def test_set_busy_disables_controls_for_manual_run(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         gui = KronosGUI.__new__(KronosGUI)
         gui.auto_forecast_running = False
@@ -281,7 +285,7 @@ class TestGuiControllerMethods(unittest.TestCase):
         gui.progress.setVisible.assert_called_with(True)
 
     def test_stop_auto_forecast_invalidates_active_run_and_resets_ui(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         gui = KronosGUI.__new__(KronosGUI)
         gui.auto_forecast_running = True
@@ -337,7 +341,7 @@ class TestQtGuiIntegration(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         self.fake_model_configs = {
             "test-model": {
@@ -510,8 +514,8 @@ class TestQtGuiIntegration(unittest.TestCase):
 
         self.assertIsNone(self.window.paper_position)
         self.assertEqual(self.window.paper_trade_table.rowCount(), 0)
-        self.assertEqual(len(self.window.paper_trade_history), 0)
-        self.assertEqual(len(self.window.paper_equity_history), 0)
+        self.assertEqual(len(self.window.execution.trade_history), 0)
+        self.assertEqual(len(self.window.execution.equity_history), 0)
         self.assertEqual(self.window.paper_position_table.item(0, 0).text(), "--")
 
     def test_changing_initial_equity_resets_paper_account(self):

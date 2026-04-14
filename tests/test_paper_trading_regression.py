@@ -86,7 +86,8 @@ def build_paper_entry_payload(
 
 
 def build_gui_stub_with_paper():
-    from qtgui.kronos_gui import KronosGUI
+    from kronos_gui import KronosGUI
+    from execution import ExecutionEngine
 
     gui = KronosGUI.__new__(KronosGUI)
     gui.selected_model_key = "kronos-small-local"
@@ -105,26 +106,11 @@ def build_gui_stub_with_paper():
     gui.set_busy = MagicMock()
     gui._save_forecast_results = MagicMock()
     gui._schedule_next_auto_forecast = MagicMock()
-    gui.paper_trade_history = []
     gui.append_log = MagicMock()
     gui.show_error = MagicMock()
     gui.update_paper_mode = MagicMock()
-    gui.paper_enabled = True
-    gui.paper_latest_market_df = None
+    gui.execution = ExecutionEngine()
     gui.execution_mode = "paper"
-    gui.paper_order_quantity = 0.01
-    gui.paper_order_leverage = 5
-    gui.paper_use_risk_fraction = True
-    gui.paper_risk_fraction = 0.08
-    gui.paper_initial_equity = 1000.0
-    gui.paper_realized_equity = 1000.0
-    gui.paper_equity_history = []
-    gui.paper_position = None
-    gui.paper_last_decision = None
-    gui.paper_last_snapshot = None
-    gui.paper_realized_pnl_pct = 0.0
-    gui.paper_trade_history = []
-    gui.paper_strategy_config = MagicMock()
     return gui
 
 
@@ -132,50 +118,42 @@ class TestRiskFractionCalculation(unittest.TestCase):
     """Test risk fraction position sizing logic."""
 
     def test_current_order_quantity_by_risk_handles_zero_stop_distance(self):
-        from qtgui.kronos_gui import KronosGUI
+        from execution import ExecutionEngine
 
-        gui = KronosGUI.__new__(KronosGUI)
-        gui.paper_risk_fraction = 0.08
-        gui.paper_realized_equity = 1000.0
-        gui.paper_initial_equity = 1000.0
-        gui.paper_equity_history = []
-        gui.paper_order_quantity = 0.01
-        gui.paper_order_qty_spin = MagicMock()
-        gui.paper_order_qty_spin.value.return_value = 0.01
+        engine = ExecutionEngine()
+        engine.risk_fraction = 0.08
+        engine.realized_equity = 1000.0
+        engine.initial_equity = 1000.0
 
-        result = gui.current_order_quantity_by_risk(entry_price=100.0, stop_distance_pct=0.0)
+        result = engine.current_order_quantity_by_risk(entry_price=100.0, stop_distance_pct=0.0)
 
         self.assertGreater(result, 0)
-        self.assertEqual(result, 0.01)
+        self.assertEqual(result, engine.current_order_quantity())
 
     def test_current_order_quantity_by_risk_uses_risk_fraction_correctly(self):
-        from qtgui.kronos_gui import KronosGUI
+        from execution import ExecutionEngine
 
-        gui = KronosGUI.__new__(KronosGUI)
-        gui.paper_risk_fraction = 0.08
-        gui.paper_realized_equity = 1000.0
-        gui.paper_initial_equity = 1000.0
-        gui.paper_equity_history = []
-        gui.paper_order_quantity = 0.01
-        gui.paper_order_qty_spin = MagicMock()
-        gui.paper_order_qty_spin.value.return_value = 0.01
+        engine = ExecutionEngine()
+        engine.risk_fraction = 0.08
+        engine.realized_equity = 1000.0
+        engine.initial_equity = 1000.0
 
         entry_price = 100.0
         stop_distance_pct = 0.02
         expected_qty = (1000.0 * 0.08) / (100.0 * 0.02)
 
-        result = gui.current_order_quantity_by_risk(entry_price, stop_distance_pct)
+        result = engine.current_order_quantity_by_risk(entry_price, stop_distance_pct)
 
         self.assertAlmostEqual(result, expected_qty)
 
     def test_return_pct_calculation_with_zero_initial_equity_does_not_crash(self):
-        from qtgui.kronos_gui import KronosGUI
+        from execution import ExecutionEngine
 
-        gui = KronosGUI.__new__(KronosGUI)
-        gui.paper_realized_equity = 100.0
-        gui.paper_initial_equity = 0.0
+        engine = ExecutionEngine()
+        engine.realized_equity = 100.0
+        engine.initial_equity = 0.0
 
-        result = gui.current_realized_return_pct()
+        result = engine.current_realized_return_pct()
 
         self.assertEqual(result, 0.0)
 
@@ -184,35 +162,35 @@ class TestPaperTradingLogic(unittest.TestCase):
     """Test paper trading entry/exit logic."""
 
     def test_paper_trading_active_requires_both_enabled_and_paper_mode(self):
-        from qtgui.kronos_gui import KronosGUI
+        from execution import ExecutionEngine
 
-        gui = KronosGUI.__new__(KronosGUI)
-        gui.paper_enabled = True
-        gui.execution_mode = "paper"
-        self.assertTrue(gui.paper_trading_active())
+        engine = ExecutionEngine()
+        engine.enabled = True
+        engine.mode = "paper"
+        self.assertTrue(engine.trading_active())
 
-        gui.paper_enabled = False
-        gui.execution_mode = "paper"
-        self.assertFalse(gui.paper_trading_active())
+        engine.enabled = False
+        engine.mode = "paper"
+        self.assertFalse(engine.trading_active())
 
-        gui.paper_enabled = True
-        gui.execution_mode = "testnet"
-        self.assertFalse(gui.paper_trading_active())
+        engine.enabled = True
+        engine.mode = "testnet"
+        self.assertFalse(engine.trading_active())
 
     def test_current_paper_equity_with_unrealized_pnl(self):
-        from qtgui.kronos_gui import KronosGUI
+        from execution import ExecutionEngine
 
-        gui = KronosGUI.__new__(KronosGUI)
-        gui.paper_realized_equity = 1000.0
+        engine = ExecutionEngine()
+        engine.realized_equity = 1000.0
 
-        self.assertEqual(gui.current_paper_equity(unrealized_amount=50.0), 1050.0)
-        self.assertEqual(gui.current_paper_equity(unrealized_amount=-30.0), 970.0)
+        self.assertEqual(engine.current_equity(unrealized_amount=50.0), 1050.0)
+        self.assertEqual(engine.current_equity(unrealized_amount=-30.0), 970.0)
 
     def test_compute_position_return_pct_for_long_position(self):
-        from qtgui.kronos_gui import KronosGUI
-        from qtgui.paper_strategy import PaperPosition
+        from execution import ExecutionEngine
+        from paper_strategy import PaperPosition
 
-        gui = KronosGUI.__new__(KronosGUI)
+        engine = ExecutionEngine()
 
         position = PaperPosition(
             side="long",
@@ -224,14 +202,14 @@ class TestPaperTradingLogic(unittest.TestCase):
             leverage=1.0,
         )
 
-        result = gui.compute_position_return_pct(position, current_price=102.0)
+        result = engine.compute_position_return_pct(position, current_price=102.0)
         self.assertAlmostEqual(result, 0.02)
 
     def test_compute_position_return_pct_for_short_position(self):
-        from qtgui.kronos_gui import KronosGUI
-        from qtgui.paper_strategy import PaperPosition
+        from execution import ExecutionEngine
+        from paper_strategy import PaperPosition
 
-        gui = KronosGUI.__new__(KronosGUI)
+        engine = ExecutionEngine()
 
         position = PaperPosition(
             side="short",
@@ -243,7 +221,7 @@ class TestPaperTradingLogic(unittest.TestCase):
             leverage=1.0,
         )
 
-        result = gui.compute_position_return_pct(position, current_price=98.0)
+        result = engine.compute_position_return_pct(position, current_price=98.0)
         expected = (100.0 / 98.0) - 1.0
         self.assertAlmostEqual(result, expected)
 
@@ -252,7 +230,7 @@ class TestPaperStrategyEdgeCases(unittest.TestCase):
     """Test paper strategy edge cases."""
 
     def test_entry_decision_with_minimal_stop_distance(self):
-        from qtgui.paper_strategy import (
+        from paper_strategy import (
             PaperStrategyConfig,
             build_entry_decision,
             build_signal_snapshot,
@@ -280,7 +258,7 @@ class TestPaperStrategyEdgeCases(unittest.TestCase):
         self.assertIsNotNone(decision.stop_distance_pct)
 
     def test_entry_decision_with_max_stop_distance(self):
-        from qtgui.paper_strategy import (
+        from paper_strategy import (
             PaperStrategyConfig,
             build_entry_decision,
             build_signal_snapshot,
@@ -320,7 +298,7 @@ class TestGuiPaperTradingIntegration(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_paper_trading_defaults(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         fake_model_configs = {
             "test-model": {
@@ -338,17 +316,17 @@ class TestGuiPaperTradingIntegration(unittest.TestCase):
             self.app.processEvents()
 
         try:
-            self.assertTrue(window.paper_enabled)
-            self.assertEqual(window.paper_initial_equity, 1000.0)
-            self.assertEqual(window.paper_order_leverage, 5)
-            self.assertTrue(window.paper_use_risk_fraction)
-            self.assertEqual(window.paper_risk_fraction, 0.08)
+            self.assertTrue(window.execution.enabled)
+            self.assertEqual(window.execution.initial_equity, 1000.0)
+            self.assertEqual(window.execution.order_leverage, 5)
+            self.assertTrue(window.execution.use_risk_fraction)
+            self.assertEqual(window.execution.risk_fraction, 0.08)
         finally:
             window.close()
             self.app.processEvents()
 
     def test_paper_equity_card_exists_no_canvas(self):
-        from qtgui.kronos_gui import KronosGUI
+        from kronos_gui import KronosGUI
 
         fake_model_configs = {
             "test-model": {
@@ -377,21 +355,21 @@ class TestPaperTradingPnlEdgeCases(unittest.TestCase):
     """Test paper trading PnL edge cases."""
 
     def test_equity_can_become_zero(self):
-        from qtgui.kronos_gui import KronosGUI
+        from execution import ExecutionEngine
 
-        gui = KronosGUI.__new__(KronosGUI)
-        gui.paper_realized_equity = 0.0
-        gui.paper_initial_equity = 1000.0
-        gui.paper_equity_history = [{"equity": 100.0, "time": pd.Timestamp.now()}]
+        engine = ExecutionEngine()
+        engine.realized_equity = 0.0
+        engine.initial_equity = 1000.0
+        engine.equity_history = [{"equity": 100.0, "time": pd.Timestamp.now()}]
 
-        equity = gui.current_paper_equity()
+        equity = engine.current_equity()
         self.assertEqual(equity, 0.0)
 
     def test_position_pnl_calculation_with_leverage(self):
-        from qtgui.kronos_gui import KronosGUI
-        from qtgui.paper_strategy import PaperPosition
+        from execution import ExecutionEngine
+        from paper_strategy import PaperPosition
 
-        gui = KronosGUI.__new__(KronosGUI)
+        engine = ExecutionEngine()
 
         position = PaperPosition(
             side="long",
@@ -403,7 +381,7 @@ class TestPaperTradingPnlEdgeCases(unittest.TestCase):
             leverage=5.0,
         )
 
-        pnl = gui.compute_position_pnl_amount(position, current_price=102.0)
+        pnl = engine.compute_position_pnl_amount(position, current_price=102.0)
         expected_pnl = (102.0 - 100.0) * 2.0
         self.assertAlmostEqual(pnl, expected_pnl)
 

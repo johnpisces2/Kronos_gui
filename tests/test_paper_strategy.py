@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from qtgui.paper_strategy import (
+from paper_strategy import (
     PaperPosition,
     PaperStrategyConfig,
     build_entry_decision,
