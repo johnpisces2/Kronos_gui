@@ -375,7 +375,7 @@ class TestQtGuiIntegration(unittest.TestCase):
             for i in range(self.window.main_tabs.count())
         ]
 
-        self.assertEqual(tab_labels, ["Market", "Execution"])
+        self.assertEqual(tab_labels, ["Market", "Backtest", "Execution"])
 
     def test_auto_forecast_button_click_toggles_running_and_stopped_state(self):
         self.window._run_auto_forecast = MagicMock()

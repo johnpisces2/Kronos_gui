@@ -78,8 +78,8 @@ class TestPaperStrategy(unittest.TestCase):
         decision = build_entry_decision(build_signal_snapshot(build_payload()), config)
 
         self.assertEqual(decision.action, "enter_long")
-        self.assertAlmostEqual(decision.stop_distance_pct, 0.02, places=6)
-        self.assertAlmostEqual(decision.stop_price, 98.0, places=6)
+        self.assertAlmostEqual(decision.stop_distance_pct, 0.025, places=6)
+        self.assertAlmostEqual(decision.stop_price, 97.5, places=6)
 
     def test_entry_short_requires_reverse_alignment(self):
         payload = build_payload(
@@ -92,7 +92,7 @@ class TestPaperStrategy(unittest.TestCase):
         decision = build_entry_decision(build_signal_snapshot(payload), PaperStrategyConfig())
 
         self.assertEqual(decision.action, "enter_short")
-        self.assertAlmostEqual(decision.stop_price, 102.0, places=6)
+        self.assertAlmostEqual(decision.stop_price, 102.5, places=6)
 
     def test_exit_long_when_validation_pred_invalidates_signal(self):
         snapshot = build_signal_snapshot(
@@ -131,6 +131,26 @@ class TestPaperStrategy(unittest.TestCase):
 
         self.assertEqual(decision.action, "exit_short")
         self.assertEqual(decision.reason, "stop_loss_hit")
+
+    def test_exit_respects_runtime_bar_interval(self):
+        snapshot = build_signal_snapshot(build_payload())
+        position = PaperPosition(
+            side="long",
+            entry_price=100.0,
+            stop_price=98.0,
+            take_profit_price=104.0,
+            entry_time=pd.Timestamp("2026-04-13 00:00:00"),
+        )
+
+        decision = build_exit_decision(
+            position,
+            snapshot,
+            PaperStrategyConfig(max_bars_in_position=3),
+            bar_interval_hours=1.0,
+        )
+
+        self.assertEqual(decision.action, "exit_long")
+        self.assertEqual(decision.reason, "time_exit (STRONG_BULL)")
 
 
 if __name__ == "__main__":

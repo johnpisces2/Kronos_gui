@@ -19,11 +19,13 @@ if sys.platform == "darwin":
     os.environ.setdefault("QT_QPA_PLATFORM", "cocoa")
 
 try:
-    from PyQt5.QtCore import Qt, pyqtSignal
+    from PyQt5.QtCore import Qt, pyqtSignal, QDate
+    from PyQt5.QtGui import QColor
     from PyQt5.QtWidgets import (
         QAbstractItemView,
         QApplication,
         QComboBox,
+        QDateEdit,
         QDoubleSpinBox,
         QFrame,
         QHeaderView,
@@ -50,11 +52,13 @@ try:
     )
     QT_API = "PyQt5"
 except ImportError:
-    from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtCore import Qt, pyqtSignal, QDate
+    from PyQt6.QtGui import QColor
     from PyQt6.QtWidgets import (
         QAbstractItemView,
         QApplication,
         QComboBox,
+        QDateEdit,
         QDoubleSpinBox,
         QFrame,
         QHeaderView,
@@ -119,6 +123,7 @@ from paper_strategy import (
     build_signal_snapshot,
 )
 from execution import ExecutionEngine
+from backtester import Backtester
 
 LOCAL_MLX_MODEL_PATH = os.path.join(PROJECT_ROOT, "model", "kronos-mlx-base")
 LOCAL_MLX_TOKENIZER_PATH = os.path.join(PROJECT_ROOT, "model", "kronos-mlx-tokenizer-base")
@@ -1239,6 +1244,7 @@ class KronosGUI(QMainWindow):
         self.main_tabs = QTabWidget()
         self.main_tabs.setStyleSheet("QTabWidget::pane { border: none; }")
         self.main_tabs.addTab(self.create_market_tab(), "Market")
+        self.main_tabs.addTab(self.create_backtest_tab(), "Backtest")
         self.main_tabs.addTab(self.create_execution_tab(), "Execution")
         
         layout.addWidget(self.main_tabs)
@@ -1433,6 +1439,462 @@ class KronosGUI(QMainWindow):
 
         self.set_paper_defaults()
         return tab
+
+    def create_backtest_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        controls = QFrame()
+        controls.setObjectName("metricCard")
+        ctrl_layout = QGridLayout(controls)
+        ctrl_layout.setContentsMargins(10, 8, 10, 8)
+        ctrl_layout.setHorizontalSpacing(12)
+        ctrl_layout.setVerticalSpacing(6)
+
+        ctrl_layout.addWidget(QLabel("Start"), 0, 0)
+        self.bt_start_date = QDateEdit()
+        self.bt_start_date.setCalendarPopup(True)
+        self.bt_start_date.setDisplayFormat("yyyy-MM-dd")
+        self.bt_start_date.setMinimumWidth(110)
+        two_years_ago = QDate.currentDate().addYears(-2)
+        self.bt_start_date.setDate(two_years_ago)
+        ctrl_layout.addWidget(self.bt_start_date, 0, 1)
+
+        ctrl_layout.addWidget(QLabel("Initial Equity"), 0, 2)
+        self.bt_equity_spin = QDoubleSpinBox()
+        self.bt_equity_spin.setRange(1000.0, 100000000.0)
+        self.bt_equity_spin.setDecimals(0)
+        self.bt_equity_spin.setSingleStep(1000.0)
+        self.bt_equity_spin.setValue(1000.0)
+        ctrl_layout.addWidget(self.bt_equity_spin, 0, 3)
+
+        ctrl_layout.addWidget(QLabel("Slippage"), 0, 4)
+        self.bt_slippage_spin = QDoubleSpinBox()
+        self.bt_slippage_spin.setRange(0.0, 5.0)
+        self.bt_slippage_spin.setDecimals(1)
+        self.bt_slippage_spin.setSuffix("%")
+        self.bt_slippage_spin.setValue(0.1)
+        ctrl_layout.addWidget(self.bt_slippage_spin, 0, 5)
+
+        ctrl_layout.addWidget(QLabel("Leverage"), 0, 6)
+        self.bt_leverage_spin = QSpinBox()
+        self.bt_leverage_spin.setRange(1, 125)
+        self.bt_leverage_spin.setValue(5)
+        ctrl_layout.addWidget(self.bt_leverage_spin, 0, 7)
+
+        self.bt_run_btn = QPushButton("Run Backtest")
+        self.bt_run_btn.setStyleSheet("""
+            QPushButton {
+                background: #16a34a;
+                color: white;
+                font-weight: 600;
+                padding: 6px 16px;
+            }
+            QPushButton:hover { background: #15803d; }
+        """)
+        self.bt_run_btn.clicked.connect(self.run_backtest)
+        ctrl_layout.addWidget(self.bt_run_btn, 0, 8)
+
+        ctrl_layout.addWidget(QLabel("End"), 1, 0)
+        self.bt_end_date = QDateEdit()
+        self.bt_end_date.setCalendarPopup(True)
+        self.bt_end_date.setDisplayFormat("yyyy-MM-dd")
+        self.bt_end_date.setMinimumWidth(110)
+        self.bt_end_date.setDate(QDate.currentDate())
+        ctrl_layout.addWidget(self.bt_end_date, 1, 1)
+
+        ctrl_layout.addWidget(QLabel("Fee Rate"), 1, 2)
+        self.bt_fee_spin = QDoubleSpinBox()
+        self.bt_fee_spin.setRange(0.0, 1.0)
+        self.bt_fee_spin.setDecimals(2)
+        self.bt_fee_spin.setSuffix("%")
+        self.bt_fee_spin.setValue(0.05)
+        ctrl_layout.addWidget(self.bt_fee_spin, 1, 3)
+
+        ctrl_layout.addWidget(QLabel("Risk%"), 1, 4)
+        self.bt_risk_spin = QDoubleSpinBox()
+        self.bt_risk_spin.setRange(0.1, 50.0)
+        self.bt_risk_spin.setDecimals(0)
+        self.bt_risk_spin.setSuffix("%")
+        self.bt_risk_spin.setValue(8.0)
+        ctrl_layout.addWidget(self.bt_risk_spin, 1, 5)
+
+        self.bt_cancel_btn = QPushButton("Cancel")
+        self.bt_cancel_btn.setEnabled(False)
+        self.bt_cancel_btn.setStyleSheet("""
+            QPushButton {
+                background: #dc2626;
+                color: white;
+                font-weight: 600;
+                padding: 6px 16px;
+            }
+            QPushButton:hover { background: #b91c1c; }
+            QPushButton:disabled { background: #525252; color: #a1a1a1; }
+        """)
+        self.bt_cancel_btn.clicked.connect(self.cancel_backtest)
+        ctrl_layout.addWidget(self.bt_cancel_btn, 1, 8)
+
+        self._bt_running = False
+        self._bt_cancelled = False
+
+        layout.addWidget(controls)
+
+        self.bt_metrics_layout = QGridLayout()
+        self.bt_metrics_layout.setSpacing(8)
+        self.bt_metrics_layout.setContentsMargins(0, 4, 0, 4)
+
+        self.bt_total_pnl_card = MetricCard("Total P&L", "#22c55e")
+        self.bt_win_rate_card = MetricCard("Win Rate", "#38bdf8")
+        self.bt_trades_card = MetricCard("Trades", "#f59e0b")
+        self.bt_sharpe_card = MetricCard("Sharpe", "#a855f7")
+        self.bt_max_dd_card = MetricCard("Max DD", "#ef4444")
+        self.bt_return_card = MetricCard("Return", "#22c55e")
+
+        self.bt_metrics_layout.addWidget(self.bt_total_pnl_card, 0, 0)
+        self.bt_metrics_layout.addWidget(self.bt_win_rate_card, 0, 1)
+        self.bt_metrics_layout.addWidget(self.bt_trades_card, 0, 2)
+        self.bt_metrics_layout.addWidget(self.bt_sharpe_card, 0, 3)
+        self.bt_metrics_layout.addWidget(self.bt_max_dd_card, 0, 4)
+        self.bt_metrics_layout.addWidget(self.bt_return_card, 0, 5)
+
+        self.bt_profit_factor_card = MetricCard("Profit Factor", "#22c55e")
+        self.bt_avg_win_card = MetricCard("Avg Win", "#22c55e")
+        self.bt_avg_loss_card = MetricCard("Avg Loss", "#ef4444")
+        self.bt_sortino_card = MetricCard("Sortino", "#a855f7")
+        self.bt_time_in_market_card = MetricCard("Time In Market", "#38bdf8")
+        self.bt_avg_trade_card = MetricCard("Avg Trade", "#38bdf8")
+
+        self.bt_metrics_layout.addWidget(self.bt_profit_factor_card, 1, 0)
+        self.bt_metrics_layout.addWidget(self.bt_avg_win_card, 1, 1)
+        self.bt_metrics_layout.addWidget(self.bt_avg_loss_card, 1, 2)
+        self.bt_metrics_layout.addWidget(self.bt_sortino_card, 1, 3)
+        self.bt_metrics_layout.addWidget(self.bt_time_in_market_card, 1, 4)
+        self.bt_metrics_layout.addWidget(self.bt_avg_trade_card, 1, 5)
+
+        for card in [self.bt_total_pnl_card, self.bt_win_rate_card, self.bt_trades_card,
+                     self.bt_sharpe_card, self.bt_max_dd_card, self.bt_return_card,
+                     self.bt_profit_factor_card, self.bt_avg_win_card, self.bt_avg_loss_card,
+                     self.bt_sortino_card, self.bt_time_in_market_card, self.bt_avg_trade_card]:
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        layout.addLayout(self.bt_metrics_layout)
+
+        trades_group = QGroupBox("Trade History")
+        trades_layout = QVBoxLayout(trades_group)
+        trades_layout.setContentsMargins(6, 6, 6, 6)
+
+        self.bt_trade_table = QTableWidget(0, 10)
+        self.bt_trade_table.setHorizontalHeaderLabels([
+            "Entry Time", "Exit Time", "Side", "Entry", "Exit", "Qty", "Lev",
+            "P&L", "Return %", "Reason"
+        ])
+        self.bt_trade_table.verticalHeader().setVisible(False)
+        self.bt_trade_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.bt_trade_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.bt_trade_table.setMinimumHeight(200)
+        self.bt_trade_table.horizontalHeader().setStretchLastSection(False)
+        for col in range(10):
+            self.bt_trade_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Stretch)
+        self.bt_trade_table.setColumnWidth(2, 50)
+        self.bt_trade_table.setColumnWidth(6, 50)
+        trades_layout.addWidget(self.bt_trade_table)
+        layout.addWidget(trades_group)
+
+        self.bt_results_text = QTextEdit()
+        self.bt_results_text.setReadOnly(True)
+        self.bt_results_text.setMinimumHeight(150)
+        self.bt_results_text.setPlaceholderText("Backtest results will appear here...")
+        layout.addWidget(self.bt_results_text)
+
+        self._init_backtest_metrics()
+        return tab
+
+    def _init_backtest_metrics(self):
+        self.bt_total_pnl_card.set_content("--", "Total profit/loss")
+        self.bt_win_rate_card.set_content("--", "Win rate %")
+        self.bt_trades_card.set_content("--", "Total trades")
+        self.bt_sharpe_card.set_content("--", "Sharpe ratio")
+        self.bt_max_dd_card.set_content("--", "Max drawdown")
+        self.bt_return_card.set_content("--", "Total return %")
+        self.bt_profit_factor_card.set_content("--", "Gross profit / loss")
+        self.bt_avg_win_card.set_content("--", "Average win $")
+        self.bt_avg_loss_card.set_content("--", "Average loss $")
+        self.bt_sortino_card.set_content("--", "Sortino ratio")
+        self.bt_time_in_market_card.set_content("--", "Time in market %")
+        self.bt_avg_trade_card.set_content("--", "Average trade return")
+
+    def cancel_backtest(self):
+        self._bt_cancelled = True
+        self.bt_results_text.append("[INFO] Cancelling backtest...")
+
+    def run_backtest(self):
+        if self._bt_running:
+            return
+
+        self._bt_running = True
+        self._bt_cancelled = False
+        self.bt_run_btn.setEnabled(False)
+        self.bt_cancel_btn.setEnabled(True)
+        self.bt_results_text.append("[INFO] Starting backtest...")
+
+        try:
+            initial_equity = self.bt_equity_spin.value()
+            fee_rate = self.bt_fee_spin.value() / 100.0
+            slippage_pct = self.bt_slippage_spin.value() / 100.0
+
+            start_date = self.bt_start_date.date()
+            end_date = self.bt_end_date.date()
+
+            if end_date <= start_date:
+                self.bt_results_text.append("[ERROR] End date must be after start date.")
+                self._bt_running = False
+                self.bt_run_btn.setEnabled(True)
+                self.bt_cancel_btn.setEnabled(False)
+                return
+
+            if end_date > QDate.currentDate():
+                self.bt_results_text.append("[ERROR] End date cannot be in the future.")
+                return
+
+            start_str = start_date.toString("yyyy-MM-dd")
+            end_str = end_date.toString("yyyy-MM-dd")
+
+            if initial_equity <= 0:
+                self.bt_results_text.append("[ERROR] Initial equity must be greater than 0.")
+                return
+
+            self.bt_results_text.append(f"[INFO] Fetching {start_str} to {end_str} from Binance...")
+
+            exchange = ccxt.binance({
+                "enableRateLimit": True,
+                "options": {"defaultType": "future"},
+            })
+
+            symbol = self.symbol_combo.currentText()
+            timeframe = self.tf_combo.currentText()
+
+            since = int(pd.Timestamp(start_str, tz="Asia/Shanghai").timestamp() * 1000)
+            now = int(pd.Timestamp(end_str + " 23:59:59", tz="Asia/Shanghai").timestamp() * 1000)
+
+            all_ohlcv = []
+            current_since = since
+            while current_since < now:
+                try:
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=current_since, limit=1500)
+                    if not ohlcv:
+                        break
+                    all_ohlcv.extend(ohlcv)
+                    last_ts = ohlcv[-1][0]
+                    if last_ts >= now:
+                        break
+                    current_since = last_ts + 1
+                except Exception as e:
+                    self.bt_results_text.append(f"[WARN] Fetch error: {e}")
+                    break
+
+            if not all_ohlcv:
+                self.bt_results_text.append("[ERROR] No data fetched from Binance.")
+                return
+
+            df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["timestamps"] = to_display_timestamp_series(
+                pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            )
+            df = df.drop(columns=["timestamp"]).reset_index(drop=True)
+            df["amount"] = df["volume"] * df["close"] * 0.0001
+
+            self.bt_results_text.append(f"[INFO] Downloaded {len(df)} candles")
+
+            lookback = self.lookback_spin.value()
+            pred_len = self.predlen_spin.value()
+            temperature = self.temp_spin.value()
+            top_p = self.topp_spin.value()
+            sample_count = self.sample_spin.value()
+
+            context_df = df.copy()
+            total_len = len(context_df)
+
+            val_start_idx = max(lookback, int(total_len * 0.7))
+            val_history_df = context_df.iloc[:val_start_idx].copy()
+            val_actual_df = context_df.iloc[val_start_idx:].copy()
+
+            self.bt_results_text.append(f"[INFO] Loading model for backtest...")
+            predictor, backend_name = self.ensure_predictor_loaded()
+            self.bt_results_text.append(f"[INFO] Model loaded: {backend_name}")
+
+            def predictor_fn(context_df_for_pred, temperature=temperature, top_p=top_p, sample_count=sample_count):
+                columns = ["open", "high", "low", "close", "volume"]
+                x_df = context_df_for_pred[columns].copy()
+                x_ts = ensure_timestamp_series(context_df_for_pred["timestamps"])
+
+                step = infer_time_delta(context_df_for_pred["timestamps"])
+                future_ts = build_future_timestamps(x_ts.iloc[-1], step, pred_len)
+
+                future_pred_df, _ = self.generate_sampled_forecast(
+                    predictor=predictor,
+                    x_df=x_df,
+                    x_ts=x_ts,
+                    future_ts=future_ts,
+                    pred_len=pred_len,
+                    temperature=temperature,
+                    top_p=top_p,
+                    sample_count=sample_count,
+                )
+                return {"future_pred_df": future_pred_df}
+
+            forecast_params = {
+                "lookback": lookback,
+                "pred_len": pred_len,
+                "temperature": temperature,
+                "top_p": top_p,
+                "sample_count": sample_count,
+            }
+
+            backtester = Backtester(
+                initial_equity=initial_equity,
+                fee_rate=fee_rate,
+                slippage_pct=slippage_pct,
+            )
+
+            total_validation_bars = len(context_df) - lookback
+            self.bt_results_text.append(f"[INFO] Backtest: {lookback} lookback, {len(context_df)} total bars, {total_validation_bars} to predict")
+
+            def progress_callback(current, total):
+                if self._bt_cancelled:
+                    return False
+                if current % 50 == 0:
+                    self.bt_results_text.append(f"[PROGRESS] {current}/{total} bars processed...")
+                return True
+
+            results = backtester.run(
+                context_df=context_df,
+                predictor_fn=predictor_fn,
+                forecast_params=forecast_params,
+                debug=True,
+                progress_callback=progress_callback,
+            )
+
+            if self._bt_cancelled:
+                self.bt_results_text.append("[INFO] Backtest cancelled by user.")
+            else:
+                self._display_backtest_results(results)
+
+        except Exception as e:
+            self.bt_results_text.append(f"[ERROR] Backtest failed: {str(e)}")
+        finally:
+            self._bt_running = False
+            self.bt_run_btn.setEnabled(True)
+            self.bt_cancel_btn.setEnabled(False)
+
+    def _display_backtest_results(self, results):
+        self.bt_total_pnl_card.set_content(
+            f"${results.total_pnl:,.2f}",
+            f"{results.total_return_pct:+.2f}% return"
+        )
+
+        self.bt_win_rate_card.set_content(
+            f"{results.win_rate * 100:.1f}%",
+            f"{results.winning_trades}W / {results.losing_trades}L"
+        )
+
+        self.bt_trades_card.set_content(
+            str(results.total_trades),
+            f"Closed trades"
+        )
+
+        self.bt_sharpe_card.set_content(
+            f"{results.sharpe_ratio:.2f}",
+            "Sharpe ratio"
+        )
+
+        self.bt_max_dd_card.set_content(
+            f"${results.max_drawdown:,.2f}",
+            f"{results.max_drawdown_pct * 100:.2f}% DD"
+        )
+
+        self.bt_return_card.set_content(
+            f"{results.total_return_pct:+.2f}%",
+            f"Total return"
+        )
+
+        self.bt_profit_factor_card.set_content(
+            f"{results.profit_factor:.2f}",
+            "Profit factor"
+        )
+
+        self.bt_avg_win_card.set_content(
+            f"${results.avg_win:,.2f}",
+            "Average win"
+        )
+
+        self.bt_avg_loss_card.set_content(
+            f"${results.avg_loss:,.2f}",
+            "Average loss"
+        )
+
+        self.bt_sortino_card.set_content(
+            f"{results.sortino_ratio:.2f}",
+            "Sortino ratio"
+        )
+
+        self.bt_time_in_market_card.set_content(
+            f"{results.time_in_market_pct * 100:.1f}%",
+            "Time in market"
+        )
+
+        self.bt_avg_trade_card.set_content(
+            f"{results.avg_trade_return * 100:+.2f}%",
+            "Avg trade return"
+        )
+
+        self.bt_trade_table.setRowCount(len(results.trades))
+        for row, trade in enumerate(results.trades):
+            self.bt_trade_table.setItem(row, 0, QTableWidgetItem(str(trade.entry_time.strftime("%Y-%m-%d %H:%M"))))
+            self.bt_trade_table.setItem(row, 1, QTableWidgetItem(str(trade.exit_time.strftime("%Y-%m-%d %H:%M"))))
+            self.bt_trade_table.setItem(row, 2, QTableWidgetItem(trade.side.upper()))
+            self.bt_trade_table.setItem(row, 3, QTableWidgetItem(f"${trade.entry_price:,.2f}"))
+            self.bt_trade_table.setItem(row, 4, QTableWidgetItem(f"${trade.exit_price:,.2f}"))
+            self.bt_trade_table.setItem(row, 5, QTableWidgetItem(f"{trade.quantity:.4f}"))
+            self.bt_trade_table.setItem(row, 6, QTableWidgetItem(f"{trade.leverage}x"))
+            pnl_color = "#22c55e" if trade.pnl_amount >= 0 else "#ef4444"
+            self.bt_trade_table.setItem(row, 7, QTableWidgetItem(f"${trade.pnl_amount:,.2f}"))
+            self.bt_trade_table.item(row, 7).setForeground(QColor(pnl_color))
+            self.bt_trade_table.setItem(row, 8, QTableWidgetItem(f"{trade.return_pct * 100:+.2f}%"))
+            self.bt_trade_table.setItem(row, 9, QTableWidgetItem(trade.reason))
+
+        summary = f"""
+========== BACKTEST RESULTS ==========
+
+Initial Equity: ${self.bt_equity_spin.value():,.0f}
+Fee Rate: {self.bt_fee_spin.value():.2f}%
+Slippage: {self.bt_slippage_spin.value():.3f}%
+
+--- Performance ---
+Total Trades: {results.total_trades}
+Win Rate: {results.win_rate * 100:.2f}%
+Total P&L: ${results.total_pnl:,.2f}
+Total Return: {results.total_return_pct:.2f}%
+
+--- Risk Metrics ---
+Max Drawdown: ${results.max_drawdown:,.2f} ({results.max_drawdown_pct * 100:.2f}%)
+Sharpe Ratio: {results.sharpe_ratio:.4f}
+Sortino Ratio: {results.sortino_ratio:.4f}
+Profit Factor: {results.profit_factor:.4f}
+Time in Market: {results.time_in_market_pct * 100:.1f}%
+
+--- Trade Stats ---
+Avg Win: ${results.avg_win:,.2f}
+Avg Loss: ${results.avg_loss:,.2f}
+Avg Trade Return: {results.avg_trade_return * 100:.4f}%
+
+--- Costs ---
+Total Fees: ${results.total_fees:,.2f}
+Total Slippage: ${results.total_slippage:,.2f}
+=========================================
+"""
+        self.bt_results_text.setText(summary)
 
     def set_paper_defaults(self):
         if hasattr(self, "paper_signal_card"):
